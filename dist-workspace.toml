@@ -18,3 +18,8 @@ install-updater = false
 
 # Allow manual changes to the release workflow (fixes the 403 error)
 allow-dirty = ["ci"]
+
+auto-includes = true
+
+[package]
+changelog = "../CHANGELOG.md"
