@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add write permission to host job
 
+### Changed
+
+- Prepare for v0.1.2
+
 ## [0.1.1] - 2026-07-18
 
 ### Changed
