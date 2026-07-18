@@ -150,7 +150,7 @@ targets = [
 
 [package.metadata.binstall]
 pkg-url = "https://github.com/veralvx/{ name }/releases/download/v{ version }/{ name }-{ target }.tar.xz"
-bin-dir = "{ name }-{ target }/{ bin }{ binary-extension }"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "txz"
 
 [package.metadata.release]
