@@ -122,7 +122,7 @@ release semver:
   # 9. Commit and tag — clear the trap first: once committed, a push
   #    failure is solved by retrying the push, not by reverting files.
   trap - ERR
-  git commit -m "chore(release): prepare for $tag"
+  git commit -m "chore(release): $tag"
   git tag -a "$tag" -m "Release $tag"
 
   # 10. Push branch and tag atomically
