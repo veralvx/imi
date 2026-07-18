@@ -1,0 +1,8 @@
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+# run() in main.rs is the 7-phase pipeline and reads top-to-bottom by
+# design (see AGENTS.md);
+too-many-lines-threshold = 120

@@ -1,0 +1,8 @@
+target/
+*.iso
+*.img
+.env
+log.log
+log.txt
+vendor/
+.drafts/

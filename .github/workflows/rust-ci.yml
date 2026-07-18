@@ -1,0 +1,175 @@
+name: Rust CI (check, test, clippy, fmt, docs, miri)
+
+on:
+  push:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/rust-ci.yml"
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/rust-ci.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["--all-features", "--no-default-features"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: check-${{ matrix.features }}
+
+      - name: Cargo check
+        run: cargo check --workspace --all-targets --locked --verbose ${{ matrix.features }}
+
+  test:
+    name: Test (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["--all-features", "--no-default-features"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.features }}
+
+      - name: Cargo test
+        run: cargo test --workspace --all-targets --locked --verbose ${{ matrix.features }}
+
+  miri:
+    name: Miri (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["--all-features", "--no-default-features"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly + miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: miri-${{ matrix.features }}
+
+      - name: cargo miri setup
+        run: cargo +nightly miri setup
+
+      - name: cargo miri test
+        run: cargo +nightly miri test --workspace --locked --verbose ${{ matrix.features }}
+
+  clippy:
+    name: Clippy (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["--all-features", "--no-default-features"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ matrix.features }}
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked --verbose ${{ matrix.features }} -- -D warnings
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # dtolnay/rust-toolchain ignores rust-toolchain.toml, so the
+      # stable jobs above test the latest stable — this job is the one
+      # that actually verifies the pinned MSRV still builds and passes.
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Check + test on MSRV
+        run: |
+          cargo check --workspace --all-targets --locked
+          cargo test --workspace --locked
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps --all-features --locked

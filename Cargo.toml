@@ -1,0 +1,163 @@
+[package]
+name = "imi"
+version = "0.1.0"
+categories = [
+  "command-line-utilities",
+  "command-line-interface",
+  "os::linux-apis",
+  "filesystem",
+  "hardware-support",
+]
+edition = "2024"
+keywords = ["iso", "flasher", "usb", "linux", "direct-io"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/veralvx/imi"
+rust-version = "1.97"
+description = "Safely flash ISO/IMG images to USB drives on Linux: O_EXCL device locking, O_DIRECT aligned writes, byte-for-byte verification, transparent gzip/xz/bzip2/zstd decompression."
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = { version = "3.5", features = ["termination"] }
+indicatif = "0.18"
+libc = "0.2"
+nix = { version = "0.31", features = ["fs", "ioctl", "mount", "user"] }
+
+# DO NOT enable parallel/multithreaded features on the four
+# decompressor crates below without re-doing the analysis in
+# `Threading Plan/` — the pipelined flash arm assumes single-threaded
+# decoders (one worker thread owns the whole decode).
+bzip2 = "0.6"
+flate2 = "1.0"
+xz2 = "0.1"
+zstd = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = "fat" # fat == true
+codegen-units = 1
+panic = "unwind" # REQUIRED — do not change to "abort". FlashGuard's Drop-based
+# FATAL warning (AGENTS.md rules 5–6) relies on unwinding;
+# panic="abort" silently disables it for every panic path.
+debug = 1 # 0 | false, 1 | "line-tables-only", 2 | true
+strip = "debuginfo" # "none" | false, "debuginfo", "symbols" | true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+
+[[bin]]
+name = "imi"
+path = "src/main.rs"
+
+[lints.rust]
+absolute_paths_not_starting_with_crate = "deny"
+ambiguous-negative-literals = "deny"
+closure-returning-async-block = "warn"
+deref-into-dyn-supertrait = "deny"
+deprecated-in-future = "deny"
+deprecated-safe-2024 = "deny"
+elided_lifetimes_in_paths = "warn"
+explicit_outlives_requirements = "warn"
+if-let-rescope = "warn"
+impl-trait-overcaptures = "warn"
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+missing_copy_implementations = "warn"
+missing_docs = "warn"
+non-ascii-idents = "deny"
+single_use_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unreachable_pub = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused-crate-dependencies = "deny"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+variant_size_differences = "warn"
+
+# unsafe-code = "forbid"
+# must_not_suspend = "warn" # nightly
+# lossy_provenance_casts = "warn" # nightly
+# fuzzy_provenance_casts = "deny" # nightly
+
+[lints.clippy]
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+restriction = { level = "warn", priority = -1 }
+
+# The three groups above are deliberate project policy (see AGENTS.md).
+# `restriction` is not designed to be enabled wholesale, so the allows
+# below carve out the lints that are wrong *for this project*. Every
+# correctness-signal lint stays enabled: arithmetic_side_effects,
+# indexing_slicing, string_slice, unwrap_used, expect_used, panic,
+# unwrap_in_result, map_err_ignore, shadow_unrelated, and all cast_*
+# lints are handled per-site with fixes or `#[expect(..., reason)]`.
+blanket_clippy_restriction_lints = "allow" # the group-enable itself is the documented policy
+
+inline_trait_bounds = "allow"
+inline_modules = "allow"
+
+# -- mutually-exclusive style pairs: one side must be allowed ----------
+pub_with_shorthand = "allow" # house style is `pub(crate)`, not `pub(in crate)`
+separated_literal_suffix = "allow" # house style is `4096_u64`; unseparated_literal_suffix stays on
+semicolon_outside_block = "allow" # house style: `unsafe { .. };` — the inside-block pair stays on
+
+# -- inapplicable to a Linux-only std binary ---------------------------
+std_instead_of_core = "allow" # not a no_std/portability crate; libc/nix everywhere
+std_instead_of_alloc = "allow" # same
+
+# -- style choices this codebase makes deliberately --------------------
+implicit_return = "allow"
+min_ident_chars = "allow"
+print_stderr = "allow" # operator-facing CLI: stderr is the UI
+print_stdout = "allow" # operator-facing CLI: stdout is the UI
+question_mark_used = "allow"
+single_call_fn = "allow" # single-use helpers are the decomposition style
+absolute_paths = "allow" # fully-qualified syscall paths at call sites are
+# deliberate: `nix::sys::stat::fstat` at the use
+# site beats an import in a security-review tool
+missing_trait_methods = "allow" # re-implementing every default Read method is an
+# anti-pattern, not hardening
+arbitrary_source_item_ordering = "allow" # files are ordered pedagogically (pipeline order),
+# not alphabetically
+unused_trait_names = "allow" # `use Trait as _` churn without benefit here
+field_scoped_visibility_modifiers = "allow" # pub(crate) fields are the internal-struct pattern
+shadow_reuse = "allow" # idiomatic rebinding (`let s = s.trim()`);
+shadow_same = "allow" # shadow_unrelated remains ENABLED
+default_numeric_fallback = "allow" # suffixing every inferred literal is noise
+non_ascii_literal = "allow" # deliberate Unicode in operator-facing strings (…, ⚠)
+pattern_type_mismatch = "allow" # match ergonomics are idiomatic Rust
+single_char_lifetime_names = "allow" # 'a is idiomatic
+integer_division = "allow" # chunk/percent math is intended integer math;
+integer_division_remainder_used = "allow" # overflow concerns are covered by
+# arithmetic_side_effects, which stays enabled
+float_arithmetic = "allow" # floats appear only in human-readable size display
+as_conversions = "allow" # blanket as-ban rejected: the *lossy* cases are
+# caught by the pedantic cast_* lints, which stay
+# enabled and are fixed/expect-ed per site
+
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-gnu",
+]
+
+[package.metadata.binstall]
+pkg-url = "https://github.com/veralvx/{ name }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-extension }"
+pkg-fmt = "tgz"
+
+[package.metadata.release]
+changelog-path = "CHANGELOG.md"
+
+# [source.crates-io]
+# replace-with = "vendored-sources"
+
+# [source.vendored-sources]
+# directory = "vendor"
