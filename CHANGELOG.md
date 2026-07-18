@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.2] - 2026-07-18
+## [0.1.4] - 2026-07-18
+
+### Added
+
+- Add file extension for code of conduct
+
+### Changed
+
+- Adjust release message in justfile
+- Include changelog in dist instructions
+- Rename code of conduct
+- Update README
+
+### Fixed
+
+- Change binstall file extension
+
+### Removed
+
+- Remove previous version of code of conduct
+
+## [0.1.3] - 2026-07-18
 
 ### Added
 
@@ -14,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Prepare for v0.1.2
+- Prepare for v0.1.3
 
 ## [0.1.1] - 2026-07-18
 
@@ -31,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial commit
 
-[0.1.2]: https://github.com/veralvx/imi/compare/v0.1.1..v0.1.2
+[0.1.4]: https://github.com/veralvx/imi/compare/v0.1.3..v0.1.4
+[0.1.3]: https://github.com/veralvx/imi/compare/v0.1.1..v0.1.3
 [0.1.1]: https://github.com/veralvx/imi/compare/v0.1.0..v0.1.1
 [0.1.0]: https://github.com/veralvx/imi/tree/v0.1.0
 
