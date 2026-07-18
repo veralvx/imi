@@ -20,6 +20,3 @@ install-updater = false
 allow-dirty = ["ci"]
 
 auto-includes = true
-
-[package]
-changelog = "../CHANGELOG.md"
