@@ -149,9 +149,9 @@ targets = [
 ]
 
 [package.metadata.binstall]
-pkg-url = "https://github.com/veralvx/{ name }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+pkg-url = "https://github.com/veralvx/{ name }/releases/download/v{ version }/{ name }-{ target }.tar.xz"
 bin-dir = "{ name }-{ target }/{ bin }{ binary-extension }"
-pkg-fmt = "tgz"
+pkg-fmt = "txz"
 
 [package.metadata.release]
 changelog-path = "CHANGELOG.md"
