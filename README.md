@@ -43,6 +43,12 @@ cargo build --release
 sudo imi --img image.iso --dev /dev/sdc
 ```
 
+If the command fails with 'command not found', add your `PATH`:
+
+```
+sudo env PATH="$PATH" imi --img image.iso --dev /dev/sdc
+```
+
 The tool prints a confirmation prompt showing the device model, size, and the
 image path. Type `yes` to proceed (or pass `--yes` for scripted use).
 
