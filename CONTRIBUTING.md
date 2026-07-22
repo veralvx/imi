@@ -22,7 +22,7 @@ git clone https://github.com/veralvx/imi && cd imi
 
 ## Architecture and Guidelines
 
-Before you start coding, please read the [AGENTS.md](AGENTS.md) file. It contains the core rules of the repository and routes to documentation under `.agents/docs/` aimed at both human contributors and AI-assisted workflows.
+Before you start, please read the [AGENTS.md](AGENTS.md) file. It contains the core rules of the repository and routes to documentation under `.agents/docs/` aimed at both human contributors and AI-assisted workflows.
 
 ## Testing Strategy
 
@@ -34,8 +34,8 @@ When adding new features or fixing bugs, please keep the following in mind:
 
 ## Development Workflow
 
-1. We enforce the [Conventional Commits](https://www.conventionalcommits.org/) specification.
-2. Run our automated checks locally. Our repository includes a `Justfile` that mirrors our GitHub Actions CI pipeline.
+1. [Conventional Commits](https://www.conventionalcommits.org/) specification is enforced.
+2. Run automated checks locally. This repository includes a `Justfile` that mirrors our GitHub Actions CI pipeline.
 
 ```sh
 just checks

@@ -4,7 +4,7 @@ Flash ISO and IMG files to USB drives on Linux, with device locking, aligned
 direct I/O, and byte-for-byte verification.
 
 `imi` writes disk images to block devices (USB sticks, SD cards, NVMe drives)
-the way `dd if=image.iso of=/dev/sdX bs=4M conv=fdatasync` tries to, but
+the way `dd if=image.iso of=/dev/sdX bs=4M conv=fdatasync` does, but
 refuses dangerous targets before writing, holds the device under an exclusive
 kernel lock for the entire operation, and reads every byte back to confirm the
 flash landed correctly. Compressed images (gzip, xz, bzip2, zstd) are
