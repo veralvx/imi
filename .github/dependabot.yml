@@ -52,4 +52,4 @@ updates:
           - "patch"
     cooldown:
       default-days: 3
-      semver-major-days: 7
+      
