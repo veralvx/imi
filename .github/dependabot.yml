@@ -53,29 +53,3 @@ updates:
     cooldown:
       default-days: 3
       semver-major-days: 7
-
-  # ─── Docker ─────────────────────────────────────────────────────
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "sunday"
-      time: "07:30"
-      timezone: "UTC"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "chore"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "docker"
-    groups:
-      docker-dependencies:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-    cooldown:
-      default-days: 3
-      semver-major-days: 7

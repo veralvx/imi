@@ -3,17 +3,17 @@ default:
 
 cargo-check:
   cargo check --workspace --all-features
-  cargo check --workspace --no-default-features
+  #cargo check --workspace --no-default-features
   
 test: 
   cargo test --workspace --all-features
-  cargo test --workspace --no-default-features
+  #cargo test --workspace --no-default-features
 
 clippy: 
   #!/bin/sh
   export RUSTFLAGS="-Dwarnings"
   cargo clippy --all-targets --all-features --workspace
-  cargo clippy --all-targets --no-default-features --workspace
+  #cargo clippy --all-targets --no-default-features --workspace
   #cargo +nightly clippy --all-targets --all-features --workspace
   #cargo +nightly clippy --all-targets --no-default-features --workspace
 

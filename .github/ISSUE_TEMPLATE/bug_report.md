@@ -1,7 +1,7 @@
 ---
 name: Bug Report
 about: Report a hardware or software failure
-title: "fix: "
+title: "bug: "
 labels: "bug"
 assignees: ""
 ---
