@@ -305,7 +305,7 @@ fn tty_confirm(
     )]
     let gib = dev_size as f64 / (1024.0 * 1024.0 * 1024.0);
 
-    println!("===========================================================");
+    println!("\n");
     println!("WARNING: This will DESTROY ALL DATA on {}", dev.display());
     println!("  Model:     {model}");
     println!("  Size:      {dev_size} bytes ({gib:.2} GiB)");
@@ -314,7 +314,7 @@ fn tty_confirm(
     if let Some(n) = raw_size {
         println!("  Img size:  {n} bytes");
     }
-    println!("===========================================================");
+    println!("\n");
 
     // Open /dev/tty for read+write. Read for the response (stdin would let a
     // piped invocation bypass the prompt); write for the prompt itself
