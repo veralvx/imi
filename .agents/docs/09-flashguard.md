@@ -1,6 +1,6 @@
 # 09 — `FlashGuard`: RAII Lifecycle and Drop Semantics
 
-**Source:** `src/guard.rs`, `src/main.rs::run` (arm/set_phase/disarm calls).
+**Source:** `crates/imi-core/src/common/guard.rs`, `crates/imi-core/src/phases/phase_3.rs`, `crates/imi-core/src/phases/phase_4.rs`, `crates/imi-core/src/phases/phase_5.rs`, `crates/imi-core/src/phases/phase_6.rs` (arm/set_phase/disarm calls).
 
 **Purpose:** Guarantee that any unwind path through the destructive
 section of the pipeline emits a loud, _phase-honest_ warning to the
@@ -105,17 +105,35 @@ other than `Disarmed`. The arrows from intermediate states to "Disarmed
 completes (or when the operator passed `--skip-verification` and only the
 cooldown ran).
 
-## Where each transition fires (in `main.rs`)
+## Two guard APIs that exist for testability
 
-| Transition              | Source location                                                                                                                              |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `new(file, dev_path)`   | end of Phase 2, just acquired `O_EXCL`                                                                                                       |
-| `arm(WipingSignatures)` | start of Phase 3                                                                                                                             |
-| `set_phase(Writing)`    | start of Phase 4                                                                                                                             |
-| `set_phase(Cooldown)`   | start of Phase 5a                                                                                                                            |
-| `set_phase(Verifying)`  | start of Phase 5b                                                                                                                            |
-| `disarm()`              | end of Phase 5b (verify pass), **or** end of Phase 5a with `--skip-verification`, **or** directly after Phase 4 when both skip flags are set |
-| `into_file()`           | end of Phase 6                                                                                                                               |
+The FATAL notice is written to stderr from `Drop`, which no in-process
+test can observe. Two helpers make the decision behind it assertable:
+
+- `current_phase()` — the phase the guard would report if dropped now,
+  so the arm/set_phase/disarm transitions can be checked directly.
+- `would_warn_on_drop()` — exactly what `Drop` consults. Inverting it
+  would mean staying silent on a half-written device and warning on a
+  clean one; a test pins the polarity.
+
+A third, `ensure_device_is(expected)`, is a safety check rather than a
+testability aid. Phases 3, 4 and 5 each receive a guard and a `Target`
+separately and nothing in the type system ties them together, so a
+caller of the public per-phase API driving two devices could cross them
+and write one image onto the other. Those phases call it first and
+refuse a mismatch before anything destructive happens.
+
+## Where each transition fires (in the phase pipelines)
+
+| Transition              | Source location                                                                                                                                                                                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `new(file, dev_path)`   | end of Phase 2, just acquired `O_EXCL`                                                                                                                                                                                                                                                            |
+| `arm(WipingSignatures)` | start of Phase 3                                                                                                                                                                                                                                                                                  |
+| `set_phase(Writing)`    | start of Phase 4                                                                                                                                                                                                                                                                                  |
+| `set_phase(Cooldown)`   | start of Phase 5a                                                                                                                                                                                                                                                                                 |
+| `set_phase(Verifying)`  | start of Phase 5b                                                                                                                                                                                                                                                                                 |
+| `disarm()`              | **start of Phase 6** (`phase_6.rs`), the only phase that disarms — though `into_file()` disarms again on its way out, and either alone suppresses the notice. Which phase last ran before it depends on the skip flags: Phase 5b normally, Phase 5a with `--skip-verification`, Phase 4 with both |
+| `into_file()`           | end of Phase 6                                                                                                                                                                                                                                                                                    |
 
 `set_phase` requires the guard to already be armed (debug-asserted).
 That makes "I forgot to call `arm()` first and the warning never fires"
@@ -126,16 +144,20 @@ a panic in debug builds, not a silent safety hole.
 ```rust
 impl Drop for FlashGuard {
     fn drop(&mut self) {
-        let phase = GuardPhase::from_u8(self.phase.load(Ordering::SeqCst));
-        if !matches!(phase, GuardPhase::Disarmed) {
-            eprintln!(
+        let phase = self.current_phase();
+        if self.would_warn_on_drop() {
+            let mut err = io::stderr().lock();
+            let _notice = writeln!(
+                err,
                 "\n⚠  FATAL: flash interrupted while {} was {}. \
                  The device is in an inconsistent state. DO NOT REMOVE IT. \
                  Re-run imi to recover.",
                 self.dev_path.display(),
                 phase.interrupted_verb()
             );
+            let _flushed = err.flush();
         }
+        // `self.file` (if still `Some`) drops here, releasing the claim.
     }
 }
 ```
@@ -150,13 +172,22 @@ Notes:
   for this tool; a silently suppressed warning (fail-open) is not.
   The `from_u8_round_trips_known_phases` test pins both the round-trip
   and the fail-loud fallback.
-- `eprintln!` may allocate. Acceptable on the unwind path because
-  Rust's panic machinery keeps stderr functional even under memory
-  pressure; worst case we get a truncated line.
+- **`writeln!` with the result discarded, never `eprintln!`.** This is
+  not a style preference. `eprintln!` _panics_ if the write fails — a
+  closed or full stderr, an `EPIPE` from a dead pager. This code runs
+  from `Drop`, and the case it exists for is unwinding, where a second
+  panic aborts the process immediately. That abort would skip this very
+  notice and every remaining destructor, turning "your device is
+  half-written" into a bare `SIGABRT`.
+
+  Reproduced during the code review at exit 134, by piping stderr to a
+  reader that exits: `imi ... 2>&1 | head`. If stderr is gone the
+  operator cannot be told regardless; what matters is that the attempt
+  cannot make things worse.
 - The atomic load uses `SeqCst`. `Acquire` would suffice (we're
   synchronising with the `Release` store in `set_phase`), but the
-  cost difference is invisible against an `eprintln!` and `SeqCst`
-  is easier to reason about for future contributors.
+  cost difference is invisible against a `writeln!` to a locked stderr,
+  and `SeqCst` is easier to reason about for future contributors.
 
 ## Why an `Option<File>`, not just `File`
 
@@ -193,11 +224,26 @@ defense passes) check the flag at iteration boundaries and return
 
 ```rust
 if cancel.load(Ordering::SeqCst) {
-    bail!("cancelled by user");
+    bail!(Cancelled { during: None });
 }
 ```
 
-The `bail!` produces an `anyhow::Error` that propagates via `?`,
+`Cancelled` is a type, not a message. A string `bail!` would classify as
+`ErrorKind::Failed`, and a consumer branching on `kind()` would report a
+Ctrl+C as a failure — a downgrade this project has made once already.
+
+`during` labels the wait when naming it helps. The flash and verify
+loops pass `None`, because "cancelled by user" is already unambiguous
+there; Phase 5a passes `Some("cooldown")` and Phase 7 passes
+`Some("automount defense settle")` or `Some("automount defense")`, where
+an operator would otherwise wonder which of several sleeps they
+interrupted.
+
+Inside the pipelined arms the same value is built with `err!` and
+assigned rather than `bail!`ed, because those loops must break to their
+single cleanup block instead of returning — see `05-phase-4-flash.md`.
+
+The `bail!` produces an `imi_core::Error` that propagates via `?`,
 unwinding the stack normally — and _that_ runs `FlashGuard::drop`
 with whatever phase was active at the moment of cancel, triggering
 the appropriate warning.
@@ -222,9 +268,9 @@ if those fail, the 4 MiB buffers failed first.
 ## Why arm comes before the wipe call, not after
 
 ```rust
-guard.arm(GuardPhase::WipingSignatures);    // ← here, before
+guard.arm(ArmedPhase::WipingSignatures);    // ← here, before
 println!("Wiping partition signatures...");
-gpt::wipe_ends(&guard, dev_size)?;
+wipe_ends(guard, target.dev_size)?;   // phase_3
 ```
 
 If the wipe itself fails (`EIO` mid-write), the device is _already_
@@ -236,10 +282,10 @@ The cost of arming earlier than necessary is zero: there's no
 realistic path where the arming is observable but no destructive
 side effect has occurred.
 
-## Why disarm only at the end of Phase 5b (or earlier only via the skip flags)
+## Why disarm only once the last destructive phase has completed
 
 ```rust
-verify::verify(...)?;            // Phase 5b
+verify(...)?;                    // Phase 5b (phase_5)
 guard.disarm();                  // ← only after verify passes
 ```
 
@@ -261,7 +307,7 @@ A USB stick reported `EIO (Input/output error)` mid-verify. The
 warning printed:
 
 ```
-Cooldown and FTL sync... done
+Cooldown and FTL sync...
 Verifying data integrity...
 ⚠  FATAL: flash interrupted while /dev/sdc was being written.
 error: Phase 5b: verification: reading 4194304 bytes from device at offset 3166699520: Input/output error

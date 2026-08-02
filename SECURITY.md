@@ -12,6 +12,8 @@ Security updates and patches are exclusively applied to the latest `main` branch
 
 Please include the required technical context:
 
+- The output of `imi --version`.
+- The exact command line.
 - Host OS and kernel version.
 - Target device specifications.
 - Exact reproduction steps or a technical proof-of-concept.

@@ -1,7 +1,7 @@
 # 06 — Phase 5: Cooldown and Verification
 
-**Source:** `src/verify.rs::cooldown`, `src/verify.rs::verify`,
-`src/main.rs::run` (Phase 5 block).
+**Source:** `crates/imi-core/src/phases/phase_5.rs::cooldown`, `crates/imi-core/src/phases/phase_5.rs::verify`,
+`crates/imi-core/src/phases/phase_5.rs::run`.
 
 **Purpose:** Allow the device to finalize NAND/FTL operations before
 any read-back, then optionally compare the device contents byte-for-byte
@@ -16,7 +16,7 @@ This phase splits in two:
 ## Phase 5a — the 10-second cooldown
 
 ```rust
-verify::cooldown(10, &cancel)?;
+phase_5::cooldown(10, cancel, events)?;
 ```
 
 This is **not** ritual. Cheap USB-NAND bridge controllers (Phison, SMI,
@@ -65,33 +65,62 @@ constant from the bash original where it was tuned empirically against
 ### Cooldown implementation
 
 ```rust
-for remaining in (1..=seconds).rev() {
+events.phase_started(UiPhase::Cooldown);
+for elapsed in 0..seconds {
     if cancel.load(Ordering::SeqCst) {
-        bail!("cancelled by user during cooldown");
+        events.phase_finished(UiPhase::Cooldown, PhaseOutcome::Failed);
+        bail!(Cancelled { during: Some("cooldown") });
     }
-    write!(stdout, "\rCooldown and FTL sync... ({remaining}s)   ")?;
-    sleep(Duration::from_secs(1));
+    events.progress(UiPhase::Cooldown, elapsed, Some(seconds));
+    thread::sleep(Duration::from_secs(1));
 }
-writeln!(stdout, "\rCooldown and FTL sync... done       ")?;
+events.progress(UiPhase::Cooldown, seconds, Some(seconds));
+events.phase_finished(UiPhase::Cooldown, PhaseOutcome::Completed);
 ```
 
-In-place countdown via `\r` so we don't pollute the log. Trailing
-spaces overwrite any residual from a longer previous value (e.g.
-"10s" → " 9s" without padding would leave a stray 's'). The cancel
-flag is checked every second so Ctrl+C is responsive. The final state
-overwrites the countdown with `done`.
+The library emits seconds through `progress`; the countdown is the
+binary's rendering of them. `progress` carries its `Phase` precisely so
+a front end can tell this case apart — for Cooldown the numbers are
+seconds, where for Flash and Verify they are bytes.
+
+The binary draws it in place with `\r` so it does not pollute the log,
+padding with trailing spaces so "10s" → " 9s" leaves no stray digit.
+The final frame is `Cooldown and FTL sync...` followed by that padding.
+**There is no `done` token** — a parser wanting the end of the cooldown
+should match the carriage-return-delimited frame that has no `(Ns)` in
+it. The cancel flag is checked every second, so Ctrl+C is responsive.
 
 ## Phase 5b — verification
 
 ```rust
-if cli.skip_verification {
-    println!("Skipping verification (--skip-verification).");
+if config.skip_verification {
+    events.phase_skipped(UiPhase::Verify);
 } else {
-    println!("Verifying data integrity...");
-    verify::verify(&mut guard, &img_canon, comp,
-                   outcome.bytes_written, cli.throttle, &cancel)?;
+    verify(
+        guard,
+        &target.img_canon,
+        target.comp,
+        outcome.bytes_written,
+        config.throttle,
+        cancel,
+        events,
+    )?;
 }
 ```
+
+The library emits `phase_skipped` and `phase_started`; the
+"Skipping verification (--skip-verification)." and "Verifying data
+integrity..." lines are the binary's rendering of those events.
+
+`phase_5::run` takes `outcome: FlashOutcome` **by value**, not a bare
+`u64` and not a reference. The byte count decides how much of the device
+is read back, and a smaller number verifies part of it while still
+reporting success — so the figure must come from a completed Phase 4.
+Taking it by value is what makes that structural: `FlashOutcome` is
+`#[non_exhaustive]` with private fields, so a consumer outside the crate
+cannot build one, and the only way to hold one is to have received it
+from `phase_4::run`. Relaxing this parameter to a `u64` would give away
+the guarantee.
 
 ### Critical: verification runs while `O_EXCL` is still held
 
@@ -111,8 +140,12 @@ load-bearing. The lock is released only after verification passes.
 ### Pre-verify ioctls
 
 ```rust
-unsafe { ioctl::blkflsbuf(fd)?; }       // flush kernel buffer cache
-set_direct(fd, false)?;                 // we're using page cache for reads
+// The block covers the call alone: a `?` inside `unsafe` puts an early
+// return there, and silently adopts whatever is added after it.
+let rc = unsafe { ioctl::blkflsbuf(guard.as_raw_fd()) };
+rc.context("BLKFLSBUF (flush kernel buffer cache)")?;
+
+set_direct(guard.file(), false)?;       // page-cache reads for the tail
 ```
 
 `BLKFLSBUF` invalidates the kernel's buffer cache pages for this device.
@@ -122,13 +155,22 @@ pages from the page-cache tail in Phase 4) rather than going to the
 NAND. We need to actually round-trip through hardware to detect bad
 blocks, which is the whole point of verification.
 
+`BLKFLSBUF` is not interchangeable with `posix_fadvise(DONTNEED)`,
+which `nix` wraps safely. `blkdev_flushbuf` in `block/ioctl.c` calls
+`sync_blockdev` and then `invalidate_bdev` over the whole device,
+unconditionally; `POSIX_FADV_DONTNEED` is advisory, range-limited and
+does not sync first. Substituting it would leave the verify comparing
+the very pages the write left behind — and passing.
+
 `O_DIRECT` is disabled because the read pattern includes the trailing
 chunk which is not sector-aligned in length. Page-cache reads handle
 the unalignment transparently.
 
-### Read-and-compare loop (the serial arm's; the pipelined arm splits
+### Read-and-compare loop (serial arm)
 
-### the same work per the sections above)
+This is `verify_serial`. The pipelined arm splits the same work
+between a worker thread and the reader; see _Pipelined verify arm_
+below.
 
 ```rust
 while remaining > 0 {
@@ -180,7 +222,7 @@ top of each iteration. Verification at the throttled rate matches the
 flash rate, so total wall time is roughly 2× the flash time (write +
 read pass).
 
-The throttle sleep uses `flash::cancellable_sleep`, the same helper
+The throttle sleep uses `common::cancel::cancellable_sleep`, the same helper
 Phase 4 uses, so Ctrl+C remains responsive (~100ms latency) at any
 throttle rate.
 
@@ -189,19 +231,22 @@ throttle rate.
 Identical template to Phase 4 (raw image case):
 
 ```
-[==================>                     ]  47% 476.84 MiB / 1.00 GiB (1.35 GiB/s)
+[==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
 ```
 
 Five fixed components: bar, percent (right-aligned to 3 columns),
 `{bytes}` read so far, `{total_bytes}` (= `bytes_written` from Phase 4),
-and the current read rate. The semantic shift from "writing" to
+and the current read rate. As in Phase 4, the `====>` glyphs come from
+`.progress_chars("=> ")` on the builder rather than from the template —
+indicatif's default is the block characters `█░`. The semantic shift from "writing" to
 "reading-back" is implied by the surrounding `Verifying data
 integrity...` headline; the bar layout itself is identical so the
 operator's eye doesn't have to recalibrate.
 
-`pb.reset_elapsed()` is called before the loop, same reason as Phase 4
-— to exclude `BLKFLSBUF` and decompressor-init time from the rate
-calculation. See `00-cli-and-ux.md` for the unified-template rationale.
+`progress(Phase::Verify, 0, Some(bytes_written))` is emitted before the
+loop — the front end creates its bar on `phase_started` and resets its
+clock on that first `progress`, same reason as Phase 4 — to exclude
+`BLKFLSBUF` and decompressor-init time from the rate calculation. See `00-cli-and-ux.md` for the unified-template rationale.
 
 ### Mismatch reporting
 
@@ -220,15 +265,16 @@ This is why `--skip-verification` is opt-in, not default.
 
 ## Dispatch and shared helpers (threading plan, phase 5b)
 
-`verify::verify` is a thin runtime dispatcher on
+`phase_5::verify` is a thin runtime dispatcher on
 `comp.is_compressed()`, with the once-only setup — `BLKFLSBUF`,
 `set_direct(false)`, reopening the image — hoisted into it for both
 arms. Raw images take **`verify_serial`** (the pre-threading loop,
 verbatim); compressed images take **`verify_pipelined`** (below).
 Both arms compare through **`compare_chunk`** — pure, no I/O: byte
 equality plus the first-diff absolute-offset diagnostic live there,
-fixed once — and finish through **`verify_finalize`** (bar teardown +
-newline; no `fdatasync`, verify is read-only). The mismatch message
+fixed once — and finish through **`verify_finalize`** (bar teardown; no
+newline — `finish_and_clear` leaves the cursor on the row the bar
+occupied, and no `fdatasync`, since verify is read-only). The mismatch message
 is byte-identical across arms, pinned by
 `verify_arms_report_identical_mismatch`.
 
@@ -272,12 +318,13 @@ silently corrupts the device.
 ```sh
 # Normal verify path:
 sudo ./target/release/imi -i debian-live.iso -d /dev/sdb -y
-# Should display "Cooldown and FTL sync... done", then "Verifying...",
+# Should display the cooldown countdown settling to
+# "Cooldown and FTL sync...", then "Verifying data integrity...",
 # then succeed.
 
-# --skip-verification path:
-sudo ./target/release/imi -i debian-live.iso -d /dev/sdb -y -n
-# Should display "Cooldown and FTL sync... done", then
+# --skip-verification path. There is no short form for this flag:
+sudo ./target/release/imi -i debian-live.iso -d /dev/sdb -y --skip-verification
+# Should display the cooldown, then
 # "Skipping verification (--skip-verification).", then proceed.
 
 # Counterfeit-stick simulation: flash an image larger than the stick's

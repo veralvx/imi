@@ -1,6 +1,8 @@
 # 04 — Phase 3: Signature Wipe
 
-**Source:** `src/gpt.rs::wipe_ends`, `src/main.rs::run` (Phase 3 block).
+**Source:** `crates/imi-core/src/phases/phase_3.rs::wipe_ends`,
+`crates/imi-core/src/phases/phase_3.rs::run`,
+`crates/imi-core/src/common/geometry.rs` (`WIPE_REGION`).
 
 **Purpose:** Destroy the existing partition table and filesystem
 superblocks at the head and tail of the device before writing the new
@@ -10,7 +12,10 @@ stale metadata that the image's contents do not overlap.
 ## What gets wiped
 
 ```rust
-pub const WIPE_REGION: u64 = 1024 * 1024;       // 1 MiB
+// common/geometry.rs — Phase 0 reads it for the size floor too, which
+// is why it is not in this phase.
+pub(crate) const WIPE_REGION: u64 = 1024 * 1024; // 1 MiB
+
 write_all_at(&zeros, 0)?;                        // head
 write_all_at(&zeros, dev_size - WIPE_REGION)?;   // tail
 fdatasync(guard.file())?;                        // AsFd-based since nix 0.30
@@ -28,7 +33,10 @@ fdatasync(guard.file())?;                        // AsFd-based since nix 0.30
 A 1 MiB head wipe is not equivalent to `wipefs -a`. Several filesystems
 place secondary or auxiliary superblocks deeper into the volume:
 
-- **btrfs** has copies at 64 MiB, 256 GiB, and 1 PiB.
+- **btrfs** keeps three superblocks, at 64 KiB, 64 MiB and 256 GiB
+  (`btrfs_sb_offset` in `fs/btrfs/disk-io.h`, with
+  `BTRFS_SUPER_MIRROR_MAX` of 3). Only the first is inside the head
+  wipe; the other two survive it.
 - **ZFS** has labels at the start, end, and quarter-points.
 - **bcache** has a superblock at 8 KiB into each cached/backing device.
 
@@ -71,13 +79,21 @@ half-wiped layout.
 ## When the guard arms
 
 ```rust
-guard.arm(GuardPhase::WipingSignatures);             // ← here
-println!("Wiping partition signatures...");
-gpt::wipe_ends(&guard, dev_size)?;
+guard.ensure_device_is(&target.dev_canon)?;   // refuse a crossed pairing
+guard.arm(ArmedPhase::WipingSignatures);      // ← here
+events.phase_started(UiPhase::Wipe);          // the binary renders it
+wipe_ends(guard, target.dev_size)?;
 ```
 
+`arm` takes `ArmedPhase`, not `GuardPhase`: `GuardPhase` is the public
+enum that includes `Disarmed`, and a guard cannot be armed _into_ the
+disarmed state. The library emits `phase_started` rather than printing —
+the "Wiping partition signatures..." line is the binary's rendering of
+that event.
+
 The guard arms _immediately before_ the first destructive operation in
-the entire pipeline. From this point until Phase 5b's disarm, any
+the entire pipeline. From this point until the `disarm()` at the start
+of Phase 6, any
 unwind path (panic, `?`, Ctrl+C) prints the "device in inconsistent
 state, do not remove" warning to stderr.
 

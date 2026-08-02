@@ -1,7 +1,7 @@
 # 03 — Phase 2: Exclusive Claim and TOCTOU Closure
 
-**Source:** `src/main.rs::open_exclusive`, `src/main.rs::run` (Phase 2
-block), `src/guard.rs`.
+**Source:** `crates/imi-core/src/phases/phase_2.rs::open_exclusive`, `crates/imi-core/src/phases/phase_2.rs::run` (Phase 2
+block), `crates/imi-core/src/common/guard.rs`.
 
 **Purpose:** Acquire kernel-enforced exclusive ownership of the target
 block device, then re-verify topology under the lock to close the
@@ -76,14 +76,53 @@ so the check is monotonic from this point: anything we don't see here
 cannot appear before we explicitly drop the FD in Phase 6.
 
 The re-check also verifies **device identity** against the Phase 0
-snapshot (`DeviceIdentity`): `fstat` of the _claimed FD_ must report the
-same `st_rdev`, sysfs must report the same model string, and
-`BLKGETSIZE64` on the claimed FD must report the same size. This closes
-the replug TOCTOU: between the operator confirming the prompt and the
-`O_EXCL` open, a stick can be yanked and a different one can land on the
-same `/dev/sdX` name (frequently with the same recycled devt — which is
-why the model and size comparisons back up the rdev check). A mismatch
-aborts before the guard ever arms.
+snapshot (`DeviceIdentity`), all five fields: `fstat` of the _claimed
+FD_ must report the same `st_rdev`, sysfs must report the same model,
+`wwid` and `serial`, and `BLKGETSIZE64` on the claimed FD must report
+the same size. A mismatch on any one aborts before the guard ever arms.
+
+This closes the replug TOCTOU: between the operator confirming the
+prompt and the `O_EXCL` open, a stick can be yanked and a different one
+can land on the same `/dev/sdX` name, frequently with the same recycled
+devt.
+
+**Field report.** A SanDisk 3.2Gen1 stick, checked on real hardware,
+exposes a `model` and no usable `serial` or `wwid` — but the two fail
+differently, and the difference is worth knowing.
+
+`serial` is simply not present under `/sys/class/block/sdc/device/`.
+`wwid` **is** present: SCSI registers that attribute for every device.
+Reading it returns `ENXIO`, because this device reports no VPD page
+0x83 data to fill it with.
+
+`device_attr_in` uses `fs::read_to_string(..).ok()`, so an errored read
+and a missing file both become `None`. That is the correct degradation
+and nothing needs changing — but it means **testing for the file's
+existence is not a test for the attribute's availability**, and any
+future code that checks `Path::exists` before reading would conclude
+this stick has a WWID when it does not.
+
+With both `None`, `check_serial` and `check_wwid` compare `None` against
+`None`, pass, and the replug detection falls back to
+`rdev + model + size` on that device — the combination that cannot
+separate two sticks of the same make and capacity.
+
+That is not a defect in the check; it is the limit of what the device
+reports. It does mean the strengthening is inert on at least one very
+common brand, and that the fallback path is the normal path rather than
+an edge case. A stick that exposes page 0x83 gets the stronger guarantee;
+one that does not gets what 0.1.7 had.
+
+`rdev`, `model` and `size` are not enough on their own, and the reason
+is the shape of the likely accident. Two sticks of the same make and
+capacity are equal in all three — and an operator is far more likely to
+have two identical sticks to hand than two different ones, so the
+commonest replug is exactly the one those three cannot see. `serial`
+(SCSI VPD page 0x80) and `wwid` (page 0x83) are what discriminate.
+Page 0x80 is vendor-defined and widely duplicated or blank on cheap
+media, which is why both are checked rather than either alone; page
+0x83 is unique by design. `None` must still be `None` at re-check, so a
+device that exposes neither does not silently pass on their absence.
 
 ## Building the FlashGuard immediately
 
@@ -100,7 +139,8 @@ guard is constructed in disarmed state; it does not yet print the
 yet.
 
 The guard arms in Phase 3 (immediately before the first `pwrite` of the
-signature wipe) and disarms in Phase 5b (after verification passes).
+signature wipe) and disarms at the start of Phase 6, once the write
+and (unless skipped) the read-back have both completed.
 See `09-flashguard.md` for the full lifecycle.
 
 ## Why `O_RDWR` and not `O_WRONLY`
@@ -112,8 +152,13 @@ both phases.
 
 ## Signal-handler installation
 
-`ctrlc::set_handler` is installed back in Phase 0 (before any
-destructive action). The handler closure captures an
+`ctrlc::set_handler` is installed by the **binary**, in
+`crates/imi/src/main.rs`, before `imi_core::run` is called at all — so
+it is live before Phase 0, let alone anything destructive. The library
+never installs it: seizing process-wide signal disposition is the
+application's business, which is why `imi_core::run_with_cancel` takes a
+caller-owned `&AtomicBool` instead (`imi_core::run` is the same pipeline
+for callers with nothing to cancel from). The handler closure captures an
 `Arc<AtomicBool>` and only flips the flag — it never calls
 `std::process::exit`. That is critical: an `exit()` from a signal
 handler bypasses all `Drop` impls, including `FlashGuard::drop`. The
@@ -122,9 +167,11 @@ return `Err`, which drives normal stack unwinding through the guard.
 
 ## What can go wrong here
 
-- `EBUSY` despite Phase 1 succeeding → almost always udisks2 racing in.
-  The error message points to that directly. Operator can disable
-  udisks2 (`systemctl stop udisks2`) and retry.
+- `EBUSY` despite Phase 1 succeeding → almost always udisks2 racing in,
+  though the message does not say so: it reads
+  `(EBUSY => someone else holds the device)`, which is the honest
+  general case. Operator can disable udisks2
+  (`systemctl stop udisks2`) and retry.
 - `EACCES` → not running as root, or `/dev/<name>` has been chmod'd
   weirdly. Phase 0's root check should have caught the first.
 - `ENOENT` → device hot-unplugged between Phase 0 canonicalize and now.

@@ -10,6 +10,14 @@ To build and test `imi` locally, you will need the following tools:
 - **Just:** A command runner for our project automation.
 - **Dprint:** Used for standardizing markdown and JSON formatting.
 - **Cocogitto:** Used to enforce Conventional Commits.
+- **A nightly toolchain with the `miri` component**
+  (`rustup toolchain install nightly --component miri`). `just checks`
+  runs `cargo +nightly miri test`, and so does CI.
+- **cargo-audit** (`cargo install cargo-audit`), for the dependency
+  advisory scan.
+
+The last two are easy to miss: without them `just checks` fails on
+tooling rather than on anything wrong with your change.
 
 ## Setup
 
@@ -30,18 +38,29 @@ When adding new features or fixing bugs, please keep the following in mind:
 
 - **Pure Functions:** Isolate core logic from side effects wherever possible and cover it with pure unit tests.
 - **Regressions:** If you are fixing a bug, include a test that explicitly reproduces the previous failure state.
-- **Destructive pipeline:** `tests/loop_pipeline.rs` holds `#[ignore]`d integration tests that flash real loop devices end-to-end. Run them with `sudo -E cargo test --test loop_pipeline -- --ignored --test-threads=1` on a machine where destroying a loop device's backing file is acceptable.
+- **Destructive pipeline:** two `#[ignore]`d suites flash real loop devices end-to-end — `crates/imi/tests/loop_pipeline.rs` drives the `imi` binary as a black box, and `crates/imi-core/tests/phase_pipeline.rs` drives `imi-core`'s per-phase API directly. Run them on a machine where destroying a loop device's backing file is
+  acceptable:
+
+  ```sh
+  sudo -E cargo test -p imi --test loop_pipeline -- --ignored --test-threads=1
+  sudo -E cargo test -p imi-core --test phase_pipeline -- --ignored --test-threads=1
+  ```
 
 ## Development Workflow
 
 1. [Conventional Commits](https://www.conventionalcommits.org/) specification is enforced.
-2. Run automated checks locally. This repository includes a `Justfile` that mirrors our GitHub Actions CI pipeline.
+2. Run automated checks locally. This repository includes a `justfile`
+   that mirrors our GitHub Actions CI pipeline.
 
 ```sh
 just checks
 ```
 
-This single command will run formatting (`cargo fmt`, `dprint`), linting (`cargo clippy -D warnings`), testing (`cargo test`), and commit validation (`cog check`). If `just checks` passes on your machine, your code likely passes on CI.
+That runs nine recipes in order: `cargo check`, the test suite, Miri,
+`cargo clippy -D warnings`, `cargo fmt --check`, a docs build with
+warnings denied, `dprint check`, `cog check`, and `cargo audit`. If
+`just checks` passes on your machine, your code likely passes on CI —
+the workflows under `.github/workflows/` run the same set.
 
 ## Creating a Pull Request
 

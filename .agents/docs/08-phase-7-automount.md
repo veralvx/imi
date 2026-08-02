@@ -1,6 +1,6 @@
 # 08 — Phase 7: Automount Defense
 
-**Source:** `src/main.rs::phase7_automount_defense`, `src/mount.rs`.
+**Source:** `crates/imi-core/src/phases/phase_7.rs::phase7_automount_defense`, `crates/imi-core/src/common/mount.rs`.
 
 **Purpose:** After the `O_EXCL` lock is released, prevent the
 just-flashed device from being auto-mounted by `udisks2`,
@@ -43,35 +43,59 @@ unmount anything that appears.
 ## The defense pattern
 
 ```rust
-fn phase7_automount_defense(dev_kname: &str, cancel: &AtomicBool)
-    -> Result<()>
-{
-    sleep(Duration::from_secs(2));            // let udev process events
-    let devts = TargetDevts::from_disk(dev_kname)?;  // rebuild post-settle
-
-    for attempt in 1..=3 {
-        if cancel.load(SeqCst) {
-            bail!("cancelled by user during automount defense");
-        }
-        let mounts = mounts_on_target(&devts)?;
-        if mounts.is_empty() {
-            return Ok(());                    // clean
-        }
-        for m in &mounts {
-            // Plain umount; per-pass failures are logged to stderr
-            // and tolerated (the next pass / final scan re-evaluate).
-            if let Err(e) = umount2(&m.target, MntFlags::empty()) {
-                eprintln!("    (unmount failed: {e}; re-checking on the next pass)");
-            }
-        }
-        sleep(Duration::from_secs(2));
+fn phase7_automount_defense<E: Events + ?Sized>(
+    dev_kname: &str,
+    cancel: &AtomicBool,
+    events: &mut E,
+) -> Result<()> {
+    events.phase_started(UiPhase::Automount);
+    cancellable_sleep(Duration::from_secs(2), cancel);   // let udev settle
+    if cancel.load(Ordering::SeqCst) {
+        bail!(Cancelled { during: Some("automount defense settle") });
     }
 
-    let still = mounts_on_target(&devts)?;
-    if still.is_empty() { Ok(()) }
-    else { bail!("device still has {} persistent mount(s) ...") }
+    let devts = TargetDevts::from_disk(dev_kname)?;      // rebuild post-settle
+
+    for attempt in 1..=3_u32 {
+        if cancel.load(Ordering::SeqCst) {
+            bail!(Cancelled { during: Some("automount defense") });
+        }
+
+        let mounts = mount::mounts_on_target(&devts)?;
+        if mounts.is_empty() {
+            return Ok(());                               // clean
+        }
+
+        events.warning(&format!("pass {attempt}: found {} new mount(s)", mounts.len()));
+        for m in &mounts {
+            events.action(&format!("unmounting {}", m.target.display()));
+            // Plain umount; per-pass failures are reported and tolerated,
+            // because the next pass and the final scan re-evaluate.
+            if let Err(e) = umount2(&m.target, MntFlags::empty()) {
+                events.warning(&format!("unmount failed: {e}; re-checking on the next pass"));
+            }
+        }
+
+        cancellable_sleep(Duration::from_secs(2), cancel);
+    }
+
+    let still = mount::mounts_on_target(&devts)?;
+    final_verdict(&still)
 }
 ```
+
+Three things in that shape are load-bearing and easy to lose.
+`Cancelled` is a **type**: a string `bail!` would classify as
+`ErrorKind::Failed`, and a consumer branching on `kind()` would report a
+Ctrl+C as a failure. The sleeps are `cancellable_sleep`, not
+`thread::sleep`, so Ctrl+C is noticed within 100 ms rather than up to
+two seconds. And the reporting goes through `Events` — the library
+writes nothing to a terminal; the `warning:` prefix and the `->`
+before an action are the binary's rendering.
+
+`final_verdict` is a separate pure function so the decision that ends the
+run — is this device safe to unplug — can be unit-tested without a
+device.
 
 ### Initial 2-second sleep
 
@@ -123,7 +147,7 @@ _mechanism_ for the same oracle-honesty reason.
 ### Cancellation responsiveness
 
 The 2-second sleeps (initial settle + between-pass) use
-`flash::cancellable_sleep`, which polls the cancel flag at 100ms
+`common::cancel::cancellable_sleep`, which polls the cancel flag at 100ms
 granularity. On Ctrl+C, the worst-case latency from key-press to
 "cancelled by user" message is ~100ms — well below the
 human-perceptible threshold for "the program is responding."
@@ -223,17 +247,22 @@ sysfs in the success path?
 The answer is no, and it's worth recording why so future contributors
 don't reintroduce a defensive sleep that isn't needed.
 
-`BLKRRPART` invokes `disk_scan_partitions()` in `block/ioctl.c`, which
-calls `add_partition()` for each newly-discovered partition.
+`BLKRRPART` invokes `disk_scan_partitions()` — the `BLKRRPART` case is
+in `block/ioctl.c`, the function itself in `block/genhd.c` — which
+leads to `add_partition()` for each newly-discovered partition.
 `add_partition()` calls `device_add()` from `drivers/base/core.c`,
 which is the kernel's canonical kobject-registration entry point and
 **synchronously creates the sysfs directory** (via `kobject_add()`)
 before returning. Only _after_ the sysfs entry exists does
 `device_add()` call `kobject_uevent(KOBJ_ADD)` to enqueue the userspace
-notification. The official kernel block ABI documents this directionally:
-`GENHD_FL_HIDDEN`, the flag for hidden devices, is described as making
-the device "not appear in sysfs" _and_ "not produce events" together —
-sysfs presence and uevent emission are coupled, not separable.
+notification. The ordering inside `device_add` is the whole guarantee, and it is worth
+being clear that nothing weaker is needed. `GENHD_FL_HIDDEN` is
+sometimes cited here — `include/linux/blkdev.h` describes a hidden
+device as one that "doesn't produce events, doesn't appear in sysfs, and
+can't be opened from userspace" — but that only shows one flag disabling
+three things at once. It does not establish that sysfs presence and
+uevent emission are coupled in general, and the argument does not need
+it to be.
 
 So by the time the `BLKRRPART` ioctl returns from kernel space, the
 partition entries are already present under `/sys/class/block/<disk>/`.

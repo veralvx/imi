@@ -1,10 +1,36 @@
 # 07 — Phase 6: Kernel Partition-Table Sync and Lock Release
 
-**Source:** `src/main.rs::run` (Phase 6 block), `src/ioctl.rs::blkrrpart`.
+**Source:** `crates/imi-core/src/phases/phase_6.rs::run`, `crates/imi-core/src/common/ioctl.rs::blkrrpart`.
 
 **Purpose:** Tell the kernel about the new partition table written in
 Phase 4, then release the `O_EXCL` claim so userspace can see and
 auto-mount the device normally.
+
+## Disarming comes first
+
+`run` opens with `guard.disarm()`, before the ioctl and before the FD is
+released. Phases 3 to 5 only ever `set_phase`, so this is the only
+phase that disarms.
+
+It is not the only _call_ site, though: `into_file()` disarms again on
+its way to taking the `File` out, a few lines below. The two are
+redundant, and that is the point — **either one alone suppresses the
+notice**, so both would have to be lost before a finished device started
+being reported as inconsistent. Verified by deleting the call above and
+flashing: still no FATAL, because `into_file()` covered it.
+
+`full_pipeline_flashes_byte_exact` asserts the notice is absent after a
+successful flash, which is what would catch losing both.
+
+Placing it here is what makes the guard's contract exact: everything
+from Phase 3's `arm` to this line is the destructive window, and an
+unwind anywhere inside it prints the FATAL notice. Which phase ran last
+before this point depends on the skip flags — Phase 5b normally, Phase
+5a with `--skip-verification`, Phase 4 with both — but in every case
+the device has been fully written and, unless verification was skipped,
+read back. Disarming any earlier would suppress the warning while the
+device was still mid-flight; any later would keep warning about a
+device that is already correct.
 
 ## What `BLKRRPART` does
 
@@ -33,36 +59,58 @@ userspace.
 active partitions in use:
 
 ```c
-// block/ioctl.c, simplified
-if (bdev->bd_part_count > 0) return -EBUSY;
+// block/genhd.c::disk_scan_partitions, which BLKRRPART now routes to
+if (!disk_has_partscan(disk))
+        return -EINVAL;
+if (disk->open_partitions)
+        return -EBUSY;
+if (!(mode & BLK_OPEN_EXCL)) {
+        ret = bd_prepare_to_claim(disk->part0, disk_scan_partitions, NULL);
+        ...
+}
 ```
 
-`bd_part_count` is the count of currently-open partitions. Holding
-`O_EXCL` on the _whole disk_ prevents any partition open from
-succeeding (kernel rejects with `EBUSY` while we hold the claim), so
-during the entire flash + verify window `bd_part_count` should be 0.
+`disk->open_partitions` is the count of currently-open partitions — the
+field older kernels called `bd_part_count`. Holding `O_EXCL` on the
+_whole disk_ prevents any partition open from succeeding (the kernel
+rejects with `EBUSY` while we hold the claim), so during the entire
+flash + verify window it should be 0.
+
+The third branch is worth noticing: a caller that is _not_ already
+holding an exclusive claim makes the kernel take one on its behalf for
+the duration of the scan. We pass `BLK_OPEN_EXCL`, so that is skipped —
+we are already the claimant.
 That makes Phase 6 the cleanest moment to issue `BLKRRPART`: any
 cooperative daemons that would otherwise have re-opened a partition
 have been blocked since Phase 2.
 
 If you released the FD _before_ `BLKRRPART`, `udisks2` would race in,
-auto-mount the new filesystem (incrementing `bd_part_count`), and your
+auto-mount the new filesystem (incrementing `open_partitions`), and your
 `BLKRRPART` would `EBUSY`. The bash original hit exactly this race for
 months before fixing the ordering.
 
 ## Why failure is non-fatal
 
 ```rust
-unsafe {
-    if let Err(e) = ioctl::blkrrpart(guard.as_raw_fd()) {
-        eprintln!("warning: BLKRRPART failed ({e}); proceeding anyway");
-    }
+// The block covers the call alone. It used to enclose the `if let` and
+// the reporting call too, which put a consumer-implemented trait method
+// inside a scope claiming to have checked its preconditions.
+let rrpart = unsafe { ioctl::blkrrpart(guard.as_raw_fd()) };
+if let Err(e) = rrpart {
+    events.warning(&format!("BLKRRPART failed ({e}); proceeding anyway"));
 }
 ```
 
+The library reports through `Events`; the `warning:` prefix and the
+stderr routing are the binary's.
+
 `BLKRRPART` can still fail in edge cases:
 
-- Some kernels reject it on certain device-mapper or loop devices.
+- Loop and device-mapper nodes without partition scanning fail the
+  `disk_has_partscan(disk)` test above and return `EINVAL`. This is not
+  a quirk — it is the first branch of the function, and it is why every
+  flash to a plain `losetup` device in a test container logs the
+  BLKRRPART warning.
 - Some firmware-emulated USB sticks have quirks where the ioctl
   returns `EINVAL` even though the partition scan would succeed.
 - On a brand-new flash with no partition table, the scan returns empty
@@ -81,7 +129,7 @@ drop(guard.into_file());
 
 `guard.into_file()` consumes the `FlashGuard`, takes the `File` out, and
 returns it. The `FlashGuard::Drop` impl runs (silently, because the
-guard was disarmed at the end of Phase 5b), and then the `File` is
+guard was disarmed at the top of this phase), and then the `File` is
 dropped on the next line.
 
 Dropping the `File`:
@@ -97,9 +145,10 @@ that was waiting on the device (e.g. a `udisks2` mount request that
 returned `EBUSY` in Phase 1) will now proceed. Phase 7 exists to defend
 against exactly that.
 
-After this drop, control passes to Phase 7. The orchestrator hands
-the disk's kernel name (not a `TargetDevts`) to
-`phase7_automount_defense`; the rebuild now lives _inside_ Phase 7,
+After this drop, control passes to Phase 7. The orchestrator hands it
+the whole `Target`; `phase_7::run` takes the disk's kernel name out of
+that and passes it — not a `TargetDevts` — to
+`phase7_automount_defense`. The rebuild now lives _inside_ Phase 7,
 after its initial settle sleep. The pre-flash devt set was built when
 the disk may have had no partitions at all; the new image likely
 creates several. Phase 7's mountinfo filter is keyed on devt, so a

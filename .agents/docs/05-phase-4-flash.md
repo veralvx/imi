@@ -1,17 +1,18 @@
 # 05 — Phase 4: Flash Write Loop
 
-**Source:** `src/flash.rs`, `src/aligned.rs`, `src/image.rs`,
-`src/main.rs::run` (Phase 4 block).
+**Source:** `crates/imi-core/src/phases/phase_4.rs`, `crates/imi-core/src/common/aligned.rs`, `crates/imi-core/src/common/image.rs`,
+`crates/imi-core/src/phases/phase_4.rs::run`.
 
 **Purpose:** Stream the (possibly compressed) image into the locked
 device FD via aligned `O_DIRECT` writes, with throttling, ENOSPC
 handling, signal responsiveness, and a smooth progress display.
 
-## High-level flow (serial arm — `flash_serial`; the pipelined arm's
+## High-level flow (serial arm)
 
-## chunk _production_ differs per the sections above, its chunk
-
-## _processing_ is this same `process_chunk` call)
+This describes `flash_serial`, the arm raw images take. The
+pipelined arm differs only in how chunks are _produced_ (a worker
+thread fills them; see _Pipelined arm_ below) — chunk _processing_ is
+the same `process_chunk` call in both.
 
 ```
 ImageReader (Raw / Gzip / Xz / Bzip2 / Zstd)
@@ -46,7 +47,7 @@ on exit than to litigate the invariant elsewhere.
 
 ## Dispatch and shared helpers (threading plan, Steps 1–3)
 
-`flash::flash` is a thin runtime dispatcher on `comp.is_compressed()`:
+`phase_4::flash` is a thin runtime dispatcher on `comp.is_compressed()`:
 raw images take **`flash_serial`** (the pre-threading loop, verbatim);
 compressed images take **`flash_pipelined`** (below). Both arms
 delegate every per-chunk decision to **`process_chunk`** — the
@@ -197,12 +198,11 @@ Throttling at 8 MiB/s by default (with `-t`) keeps the controller in
 steady state. The mechanism:
 
 ```rust
-let chunk_target_nanos = throttle.map(|rate_bps| {
-    (BUF_SIZE as u128)
-        .saturating_mul(1_000_000_000)
-        .checked_div(u128::from(rate_bps)) // rate >= 1 per parse_rate
-        .unwrap_or(u128::MAX)
-});
+// common/throttle.rs — shared with Phase 5b, and the place the zero
+// rate is rejected. Not `parse_rate`: `Config::throttle` is a public,
+// freely-assignable field and every phase is a public entry point, so a
+// library consumer reaches this arithmetic without touching the CLI.
+let chunk_target_nanos = chunk_target_nanos(throttle)?;
 // per chunk:
 let start = Instant::now();
 write_chunk();
@@ -222,7 +222,7 @@ matters at low throttle rates: at `--throttle 100K` the residual sleep
 is ~40 seconds per chunk, and a naïve `thread::sleep` would make Ctrl+C
 wait the full residual before noticing. The 100ms tick adds one atomic
 load per tick — invisible cost in any realistic profile. See
-`flash::cancellable_sleep` for the implementation.
+`common::cancel::cancellable_sleep` for the implementation.
 
 ## Cancellation
 
@@ -230,10 +230,16 @@ Top of every chunk loop:
 
 ```rust
 if cancel.load(Ordering::SeqCst) {
-    pb.abandon();
-    bail!("cancelled by user");
+    // the phase boundary reports PhaseOutcome::Failed;
+    // the front end abandons its bar on that
+    bail!(Cancelled { during: None });
 }
 ```
+
+`Cancelled` is a type, not a message. A string `bail!` here would
+classify as `ErrorKind::Failed` and a consumer branching on `kind()`
+would mis-report a Ctrl+C as a failure — the downgrade AGENTS.md records
+as having happened once already.
 
 The `Arc<AtomicBool>` is set by the `ctrlc` handler. Returning `Err`
 unwinds through `FlashGuard::drop`, which prints the "device
@@ -282,13 +288,18 @@ For raw images (known total) — a unified percent bar shared with
 Phase 5b verification:
 
 ```
-[==================>                     ]  47% 476.84 MiB / 1.00 GiB (1.35 GiB/s)
+[==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
 ```
 
 Five fixed components: bar, percent (right-aligned to 3 columns for
 stable layout), `{bytes}` written so far, `{total_bytes}` target, and
 the current rate. Phase 5b uses the identical template — the operator's
 eye doesn't have to recalibrate at the phase transition.
+
+The `====>` glyphs are not the template's doing: both builders also call
+`.progress_chars("=> ")`, without which indicatif draws the block
+characters `█░`. Reproducing the line above from the template string
+alone gives a bar that does not look like it.
 
 For compressed images (unknown decompressed size) — a spinner with byte
 count, since `{percent}` and `{total_bytes}` aren't meaningful:
@@ -298,14 +309,20 @@ count, since `{percent}` and `{total_bytes}` aren't meaningful:
 ```
 
 Both use `{bytes_per_sec}` (the standard token, which already routes
-through indicatif's double-smoothed EWMA estimator). `pb.reset_elapsed()`
-is called immediately before the loop so setup time doesn't contaminate
-the rate calculation. See `00-cli-and-ux.md` for the longer discussion
+through indicatif's double-smoothed EWMA estimator, **in the binary**).
+The phase emits `progress(Phase::Flash, 0, raw_size)` before the loop;
+the front end creates its bar on `phase_started` and calls
+`reset_elapsed()` on that first `progress`, so setup time doesn't
+contaminate the rate calculation. See `00-cli-and-ux.md` for the longer discussion
 of why this is sufficient and why the `with_smoothing()` /
 `{smoothed_bytes_per_sec}` ideas don't correspond to real APIs.
 
-On completion: `pb.finish_and_clear(); println!();` to leave a clean
-line for the next phase.
+On completion the phase boundary emits `phase_finished(Flash,
+Completed)` and the front end calls `finish_and_clear()`, which erases
+the bar and leaves the cursor at the start of the row it occupied — so
+the next phase line reuses that row. It deliberately does **not** print
+a newline: one would leave a blank line after `Flashing` and
+`Verifying` that the phases without bars do not have.
 
 ## Manual test
 

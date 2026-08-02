@@ -1,7 +1,7 @@
 # 02 — Phase 1: Topology Audit, Swap Disable, Unmounting
 
-**Source:** `src/mount.rs`, `src/sysfs.rs::holders_recursive`,
-`src/main.rs::run` (Phase 1 block).
+**Source:** `crates/imi-core/src/common/mount.rs`, `crates/imi-core/src/common/sysfs.rs::holders_recursive`,
+`crates/imi-core/src/phases/phase_1.rs::run`.
 
 **Purpose:** Bring the device into a state where the Phase 2 `O_EXCL`
 claim will succeed without disturbing user data, and where no stacked
@@ -203,10 +203,12 @@ sudo swapon /dev/sdb2                       # if available
 # Run:
 sudo ./target/release/imi -i img.iso -d /dev/sdb -y
 
-# Should produce a successful Phase 1 with:
-#   -> Disabling swap on /dev/sdb2…
-#   -> Unmounting /media/test…
-# and proceed to Phase 2.
+# Should produce a successful Phase 1 with, on stderr:
+#    -> disabling swap on /dev/sdb2
+#    -> unmounting /media/test
+# and proceed to Phase 2. The verbs are lower-case and there is no
+# ellipsis: these come from `Events::action`, which the binary renders
+# as " -> {message}". loop_pipeline asserts the unmount line verbatim.
 ```
 
 ```sh

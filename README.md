@@ -1,15 +1,40 @@
 # IMI - IMage Inoculator
 
-Flash ISO and IMG files to USB drives on Linux, with device locking, aligned
-direct I/O, and byte-for-byte verification.
+Flash bootable ISO and IMG images to USB drives and SD cards on Linux, with
+exclusive device locking, aligned direct I/O, and byte-for-byte verification.
 
-`imi` writes disk images to block devices (USB sticks, SD cards, NVMe drives)
-the way `dd if=image.iso of=/dev/sdX bs=4M conv=fdatasync` does, but
-refuses dangerous targets before writing, holds the device under an exclusive
-kernel lock for the entire operation, and reads every byte back to confirm the
-flash landed correctly. Compressed images (gzip, xz, bzip2, zstd) are
-decompressed on the fly, including multi-member/multi-stream archives produced
-by `pigz`, `pbzip2`, and `xz --threads`.
+`imi` writes disk images to block devices: USB sticks, SD cards, NVMe drives.
+It refuses dangerous targets before writing anything, holds the device under an
+exclusive kernel lock for the entire operation, and reads every byte back to
+confirm the flash landed correctly. Compressed images (gzip, xz, bzip2, zstd)
+are decompressed on the fly, including multi-member/multi-stream archives
+produced by `pigz`, `pbzip2`, and `xz --threads`.
+
+## What it checks
+
+Every one of these happens before or around the write, and any of them will
+stop the run:
+
+- Refuses partitions (`/dev/sda1`), device-mapper/LVM/dm-crypt/MD RAID stacks,
+  loopbacks backed by the image file itself, and write-protected devices.
+- Evicts desktop auto-mounts (`/media`, `/run/media`, `/var/run/media`) and swap before
+  writing; re-checks after acquiring the lock to close the TOCTOU window.
+- Holds a kernel `O_EXCL` claim from before the first destructive write through
+  verification, blocking `udisks2` and other userspace openers.
+- Wipes stale GPT/MBR signatures (first and last 1 MiB) so the new partition
+  table is the only one the kernel sees.
+- Writes through `O_DIRECT` in 4 MiB aligned chunks, bypassing the page cache.
+- Waits 10 seconds after `fdatasync` for cheap USB-NAND bridge controllers to
+  drain their write cache to flash (skippable with `--skip-cooldown`).
+- Reads back exactly the bytes written under the same lock, comparing against a
+  fresh decompress of the source image, and reports the absolute byte offset of
+  the first mismatch (skippable with `--skip-verification`).
+- Prints a `FATAL` warning naming the interrupted phase if the process is killed
+  or panics while the device is in a partially-written state.
+
+For compressed images, decompression runs on a worker thread overlapping the
+device I/O, so the wall-clock cost of decompression is mostly hidden behind the
+USB write. Raw images stay single-threaded (their read cost is negligible).
 
 ## Requirements
 
@@ -68,6 +93,8 @@ sudo imi --img image.iso --dev /dev/sdc --throttle 8M
 ### Options
 
 ```
+Safely flash an ISO/IMG (optionally compressed) to a USB block device.
+
 Usage: imi [OPTIONS] --img <PATH> --dev <DEVICE>
 
 Options:
@@ -87,17 +114,17 @@ Options:
 leaves the device untouched (phases 0–2) or prints a `FATAL` warning describing
 the interrupted state (phases 3–5b).
 
-| Phase | What happens                                                                                                                                                                                        |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Validates the image (regular file, detected compression) and the target (whole disk, not a partition, not write-protected, no LVM/dm-crypt/MD/zram stack).                                          |
-| 1     | Parses `/proc/self/mountinfo` and `/proc/swaps`; unmounts auto-mounted filesystems under `/media` and `/run/media`; disables swap on the device. Refuses filesystems mounted outside the whitelist. |
-| 2     | Opens the device with `O_EXCL` (kernel-level exclusive claim), then re-reads mounts to catch anything that raced the open.                                                                          |
-| 3     | Arms the interrupt guard. Wipes the first and last 1 MiB to destroy stale GPT/MBR/PMBR signatures.                                                                                                  |
-| 4     | Writes the image in 4 MiB `O_DIRECT` chunks. Compressed images decompress on a worker thread; raw images write single-threaded.                                                                     |
-| 5a    | 10-second cooldown for USB-NAND FTL cache drain (`--skip-cooldown` skips).                                                                                                                          |
-| 5b    | Reads back every written byte under the same lock and compares against a fresh decompress of the source image (`--skip-verification` skips).                                                        |
-| 6     | Issues `BLKRRPART` so the kernel re-reads the new partition table, then drops the `O_EXCL` lock.                                                                                                    |
-| 7     | Sweeps for desktop auto-mounts that fired between lock release and process exit.                                                                                                                    |
+| Phase | What happens                                                                                                                                                                                                         |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | Validates the image (regular file, detected compression) and the target (whole disk, not a partition, not write-protected, no LVM/dm-crypt/MD/zram stack).                                                           |
+| 1     | Parses `/proc/self/mountinfo` and `/proc/swaps`; unmounts auto-mounted filesystems under `/media`, `/run/media` or `/var/run/media`; disables swap on the device. Refuses filesystems mounted outside the whitelist. |
+| 2     | Opens the device with `O_EXCL` (kernel-level exclusive claim), then re-reads mounts to catch anything that raced the open.                                                                                           |
+| 3     | Arms the interrupt guard. Wipes the first and last 1 MiB to destroy stale GPT/MBR/PMBR signatures.                                                                                                                   |
+| 4     | Writes the image in 4 MiB `O_DIRECT` chunks. Compressed images decompress on a worker thread; raw images write single-threaded.                                                                                      |
+| 5a    | 10-second cooldown for USB-NAND FTL cache drain (`--skip-cooldown` skips).                                                                                                                                           |
+| 5b    | Reads back every written byte under the same lock and compares against a fresh decompress of the source image (`--skip-verification` skips).                                                                         |
+| 6     | Issues `BLKRRPART` so the kernel re-reads the new partition table, then drops the `O_EXCL` lock.                                                                                                                     |
+| 7     | Sweeps for desktop auto-mounts that fired between lock release and process exit.                                                                                                                                     |
 
 ## Testing
 
@@ -111,44 +138,88 @@ for all four formats, and the CLI flag surface:
 cargo test
 ```
 
-Three additional integration tests flash real loop devices end to end, requiring
-root and at least one free `/dev/loopN`:
+Two further suites drive real loop devices end to end and require root plus a
+free `/dev/loopN` — one exercising the `imi` binary as a black box, one driving
+`imi-core`'s per-phase API directly:
 
 ```
-sudo -E cargo test --test loop_pipeline -- --ignored --test-threads=1
+sudo -E cargo test -p imi --test loop_pipeline -- --ignored --test-threads=1
+sudo -E cargo test -p imi-core --test phase_pipeline -- --ignored --test-threads=1
 ```
+
+## Using it as a library
+
+The pipeline lives in [`imi-core`](https://crates.io/crates/imi-core); the
+`imi` binary is a thin CLI over it. Depend on the library to drive a flash from
+your own code:
+
+```console
+cargo add imi-core
+```
+
+```rust,no_run
+use std::path::PathBuf;
+
+let mut config = imi_core::Config::new(
+    PathBuf::from("image.iso.zst"),
+    PathBuf::from("/dev/sdc"),
+);
+config.yes = true;                       // skip the interactive confirmation
+imi_core::run(&config).expect("flash failed");
+```
+
+To make a run interruptible, use `imi_core::run_with_cancel(&config, &flag)`
+and set the `AtomicBool` from your own signal handler. The library never
+installs one: taking over process-wide signal disposition is the
+application's decision, which is why the `imi` binary owns it.
+
+The library writes nothing to a terminal. Progress, phase changes,
+warnings and the destructive-action confirmation all arrive through
+`imi_core::Events`, which you implement — so a GUI renders them its own
+way. `imi_core::run(&config)` uses a silent sink; `run_with(&config,
+&cancel, &mut ui)` is the full form. Note that `Events::confirm`
+defaults to **refusing**, so an unattended caller sets `Config::yes`.
+
+The sink is a generic parameter with a `?Sized` bound. A concrete type
+dispatches statically and the silent sink compiles away; a
+`Box<dyn Events>` — what a GUI keeps in its application state — is
+passed as `&mut *boxed` and works unchanged.
+
+Failures come back as `imi_core::Error`, which implements
+`std::error::Error`, `Display`, `Debug`, `Send` and `Sync` — so it drops
+into `thiserror` enums as a `#[source]`, boxes as `dyn Error`, or
+converts into `anyhow::Error` with `anyhow::Error::new` (the library
+itself does not depend on it). `Display`
+renders the phase context, and `{:#}` prints the whole chain:
+`Phase 4: flash write loop: cancelled by user`.
+
+Two classifications come with it, and they answer different questions.
+`Error::device_state()` says whether the hardware is safe — `Untouched`,
+`Indeterminate` (a partial image; must be re-flashed), or `Written` (the
+image is intact, the failure came afterwards). `Error::kind()` says how
+to report it — `Refused`, `Cancelled`, `VerificationFailed`, `Failed`.
+They are independent, because a cancellation can land either before or
+during the write.
+
+Each phase is also public as `imi_core::phases::phase_N::run`, so a caller that
+wants to stop between phases, report progress, or substitute a step can
+sequence them itself. `imi_core::run_with` is the function to read while doing
+so — `run` and `run_with_cancel` are two-line wrappers that supply a silent
+sink and a throwaway cancel flag before delegating to it.
+
+One step there is not a phase and is easy to miss: `run_with` ends with
+`events.finished(...)`, which is the only positive signal this crate gives
+that a device is safe to unplug. A caller sequencing the phases by hand emits
+nothing unless it makes that call itself.
+
+Everything from Phase 1 onward requires root, and Phases 3-7 are destructive.
 
 ## Design documentation
 
 Per-phase design rationale — locking semantics, `O_DIRECT` alignment invariants,
 the `FlashGuard` FATAL contract, the threading pipeline's protocol and
-shutdown proofs — lives in `.agents/docs/`. The threading plans (phase 4 flash
-and phase 5b verify) are in `.agents/docs/threading-plan/`.
-
-## What it does differently from dd
-
-`dd` writes whatever you point it at. `imi` checks first:
-
-- Refuses partitions (`/dev/sda1`), device-mapper/LVM/dm-crypt/MD RAID stacks,
-  loopbacks backed by the image file itself, and write-protected devices.
-- Evicts desktop auto-mounts (`/media`, `/run/media`) and active swap before
-  writing; re-checks after acquiring the lock to close the TOCTOU window.
-- Holds a kernel `O_EXCL` claim from before the first destructive write through
-  verification, blocking `udisks2` and other userspace openers.
-- Wipes stale GPT/MBR signatures (first and last 1 MiB) so the new partition
-  table is the only one the kernel sees.
-- Writes through `O_DIRECT` in 4 MiB aligned chunks, bypassing the page cache.
-- Waits 10 seconds after `fdatasync` for cheap USB-NAND bridge controllers to
-  drain their write cache to flash (skippable with `--skip-cooldown`).
-- Reads back exactly the bytes written under the same lock, comparing against a
-  fresh decompress of the source image, and reports the absolute byte offset of
-  the first mismatch (skippable with `--skip-verification`).
-- Prints a `FATAL` warning naming the interrupted phase if the process is killed
-  or panics while the device is in a partially-written state.
-
-For compressed images, decompression runs on a worker thread overlapping the
-device I/O, so the wall-clock cost of decompression is mostly hidden behind the
-USB write. Raw images stay single-threaded (their read cost is negligible).
+shutdown proofs — lives in `.agents/docs/`. Threading in particular is
+`.agents/docs/11-threading.md`.
 
 ## License
 

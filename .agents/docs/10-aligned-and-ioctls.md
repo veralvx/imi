@@ -1,10 +1,11 @@
 # 10 — `AlignedBuf` and the Block-Device ioctl Layer
 
-**Source:** `src/aligned.rs`, `src/ioctl.rs`.
+**Source:** `crates/imi-core/src/common/aligned.rs`, `crates/imi-core/src/common/ioctl.rs`.
 
-**Purpose:** Reference for the low-level pieces that `flash.rs`,
-`verify.rs`, and `main.rs` build on. If you change either file, this
-doc is the audit checklist.
+**Purpose:** Reference for the low-level pieces that
+`phases/phase_4.rs`, `phases/phase_5.rs` and the phase orchestration in
+`lib.rs` build on. If you change either source file, this doc is the
+audit checklist.
 
 ## `AlignedBuf` — page-aligned heap buffer for `O_DIRECT`
 
@@ -16,8 +17,8 @@ A 4 MiB heap region aligned to 4 KiB, allocated with
 in Phase 4 and (less critically) every read in Phase 5.
 
 ```rust
-pub const BUF_SIZE: usize  = 4 * 1024 * 1024;
-pub const BUF_ALIGN: usize = 4096;
+pub(crate) const BUF_SIZE: usize  = 4 * 1024 * 1024;
+pub(crate) const BUF_ALIGN: usize = 4096;
 ```
 
 ### Why those numbers
@@ -76,19 +77,32 @@ Each comes with a `// SAFETY:` comment in the source. If you alter
 
 `AlignedBuf` contains a `NonNull<u8>`, which is neither `Send` nor
 `Sync` by default. `Send` is implemented manually (SAFETY comment in
-`aligned.rs`): the buffer exclusively owns its allocation, and the
-pipelined flash arm transfers buffers between the worker and writer
-threads **by move** through `mpsc` channels — exactly one thread holds
-a given buffer at any moment, and `Drop` on either thread is fine
-because the allocator's `dealloc` is thread-safe. The
-`aligned_buf_is_send` compile-time test pins the impl against a future
-field that would make the type structurally non-`Send`.
+`aligned.rs`).
 
-`Sync` remains deliberately unimplemented: no two threads may hold
-references to the same buffer simultaneously, and nothing in the
-codebase needs them to. Channel transfer is by-move, not by-share; do
-not add `Sync` without a design document equivalent to the threading
-plan.
+The argument for `Send` is ownership, not usage: the buffer exclusively
+owns its allocation, that allocation has no thread affinity, and the
+global allocator's `alloc`/`dealloc` are thread-safe — so moving the
+sole owner to another thread and dropping it there is sound. It would
+remain sound if the crate used the type somewhere else entirely. The
+`aligned_buf_is_send` test pins the impl against a future field that
+would make the type structurally non-`Send`.
+
+`Sync` is a separate question and the answer is no: two threads holding
+`&AlignedBuf` could read the same allocation while a third path writes
+it, which the ownership argument does not cover. Nothing needs it — the
+pipelined flash arm moves buffers between the worker and writer threads
+through `mpsc`, never shares them.
+
+That is no longer a convention to be observed. `aligned_buf_is_not_sync`
+uses inherent-impl priority under `const _`, so adding
+`unsafe impl Sync for AlignedBuf` fails the **build**, not a review.
+
+Two more invariants are enforced the same way rather than trusted:
+`BUF_SIZE > 0`, because `alloc_zeroed` on a zero-sized layout is
+undefined behaviour and the SAFETY comment discharges that by pointing
+at the constant; and `BUF_ALIGN.is_power_of_two()` with
+`BUF_SIZE % BUF_ALIGN == 0`, which `Layout::from_size_align` would
+otherwise catch at runtime, on every flash, in the field.
 
 ### Zero-init, not uninit
 
@@ -101,28 +115,50 @@ defined bytes is sound. The cost (one CPU-vectorised zero of 4 MiB) is
 
 ## Block-device ioctls
 
-`src/ioctl.rs` defines its wrappers using `nix`'s ioctl macros. Each
+`crates/imi-core/src/common/ioctl.rs` defines its wrappers using `nix`'s ioctl macros. Each
 corresponds to a kernel `_IO` / `_IOR` declaration in
 `include/uapi/linux/fs.h`.
 
 ### `BLKGETSIZE64` — device size in bytes
 
 ```rust
-ioctl_read!(blkgetsize64, 0x12, 114, u64);
+ioctl_read_bad!(blkgetsize64, request_code_read!(0x12, 114, size_of::<libc::size_t>()), u64);
 ```
 
 Kernel: `_IOR(0x12, 114, size_t)`. Writes a `u64` (size in bytes)
-through the argp pointer. `nix::ioctl_read!` generates the correct
-`_IOR` request encoding and a wrapper signature
-`unsafe fn(fd, *mut u64) -> Result<i32>`.
+through the argp pointer.
 
-Used three times:
+Note `size_t`, not `u64`: the encoded size travels in the request
+number, so a 32-bit userspace must send a different number than a
+64-bit one. The kernel supports both — `block/ioctl.c` defines
+`BLKGETSIZE64_32 _IOR(0x12, 114, int)` and handles it in
+`compat_blkdev_ioctl` beside the native case, with the comment "The
+data is compatible, but the command number is different". Both call
+`put_u64`, so only the request code varies.
 
-- Phase 0 read-only query before the lock is acquired (capacity check
-  against raw image size and the `2 * WIPE_REGION` floor).
-- Phase 2 identity re-check: `BLKGETSIZE64` on the _claimed_ FD must
-  match the Phase 0 snapshot (replug-TOCTOU closure).
-- Phase 3 to know the tail-wipe offset (`dev_size - 1 MiB`).
+`ioctl_read!` derives the encoded size _and_ the out-parameter type
+from one argument, which cannot express that split — using it forces a
+hardcoded width. `ioctl_read_bad!` with an explicit
+`request_code_read!` computes the code from the target's own `size_t`
+while keeping the `*mut u64` the kernel actually writes, giving
+`unsafe fn(fd, *mut u64) -> Result<i32>` on every width.
+
+The request codes are pinned by `request_codes_match_the_kernel_headers`
+in `common/ioctl.rs`, which asserts both encodings and that ours tracks
+`size_t` rather than a fixed width.
+
+Issued from two places:
+
+- Phase 0's read-only query before the lock is acquired, which feeds the
+  capacity check against the raw image size and the `2 * WIPE_REGION`
+  floor.
+- Phase 2's identity re-check, where `BLKGETSIZE64` on the _claimed_ FD
+  must match the Phase 0 snapshot (replug-TOCTOU closure).
+
+Phase 3 needs the size for its tail-wipe offset (`dev_size - 1 MiB`) but
+does not issue the ioctl: it reads the value Phase 0 captured into the
+`Target`. Re-querying there would reopen the window the identity
+re-check exists to close.
 
 ### `BLKSSZGET` — logical sector size (intentionally not wrapped)
 
@@ -193,13 +229,19 @@ Every ioctl call is in an `unsafe` block with a `// SAFETY:` comment:
 
 ```rust
 // SAFETY: `guard` owns a valid, currently-open file descriptor for the
-// block device. BLKFLSBUF takes no argument and has no side effects on
-// memory allocated to this process.
-unsafe {
-    ioctl::blkflsbuf(guard.as_raw_fd())
-        .context("BLKFLSBUF (flush kernel buffer cache)")?;
-}
+// block device — that ownership is the enforcement, since nix's ioctl
+// macros generate `unsafe fn(fd: c_int)` and cannot carry it in the
+// type. BLKFLSBUF takes no argument and writes nothing through a
+// pointer, so there is no memory for it to touch.
+let rc = unsafe { ioctl::blkflsbuf(guard.as_raw_fd()) };
+rc.context("BLKFLSBUF (flush kernel buffer cache)")?;
 ```
+
+**The block covers the call and nothing else.** An earlier revision of
+this pattern put the `.context()?` inside, which places an early return
+in a scope that claims to have checked its preconditions — and silently
+adopts whatever a later edit adds after the call. All four ioctl sites
+were narrowed to this shape.
 
 ### Why ioctls take `RawFd` but `fdatasync` takes `&File`
 
@@ -214,8 +256,8 @@ unsafe {
   is delegated to the SAFETY comment at each call-site, which has to
   reason about FD validity anyway.
 
-This split is why `gpt.rs` calls `fdatasync(guard.file())` (passing
-`&File` directly) but `verify.rs` calls `ioctl::blkflsbuf(guard.as_raw_fd())`
+This split is why `phase_3.rs` calls `fdatasync(guard.file())` (passing
+`&File` directly) but `phase_5.rs` calls `ioctl::blkflsbuf(guard.as_raw_fd())`
 (passing the raw fd). Both are correct for their respective layers.
 
 The SAFETY comment on every ioctl call must address:
@@ -247,30 +289,40 @@ Pattern:
 ## fcntl: `O_DIRECT` toggling
 
 Not strictly an ioctl, but in the same low-level family. Declared in
-`flash.rs::set_direct`:
+`common/direct_io.rs::set_direct`:
 
 ```rust
-pub(crate) fn set_direct(fd: RawFd, enable: bool) -> Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 { … }
-    let new_flags = if enable {
-        flags | libc::O_DIRECT
-    } else {
-        flags & !libc::O_DIRECT
-    };
-    if new_flags == flags {
+pub(crate) fn set_direct<F: AsFd>(fd: F, enable: bool) -> Result<()> {
+    let bits = fcntl(&fd, FcntlArg::F_GETFL).context("fcntl(F_GETFL)")?;
+    let flags = OFlag::from_bits_retain(bits);
+
+    let wanted = if enable { flags | OFlag::O_DIRECT } else { flags & !OFlag::O_DIRECT };
+    if wanted == flags {
         return Ok(()); // already in the requested state; skip the syscall
     }
-    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, new_flags) };
-    if rc < 0 { … }
+
+    fcntl(&fd, FcntlArg::F_SETFL(wanted))
+        .with_context(|| format!("fcntl(F_SETFL, O_DIRECT={enable})"))?;
     Ok(())
 }
 ```
 
+This used to be two raw `libc::fcntl` calls in `unsafe` blocks. `nix` —
+already a dependency — wraps `fcntl` over `AsFd`, which removes the
+`unsafe` entirely and makes the descriptor's validity structural rather
+than a comment: the borrow keeps the owner alive for the call. That is
+the opposite conclusion from the ioctls above, where no safe wrapper
+exists, and the difference is worth noticing before adding another raw
+call.
+
 **`O_DIRECT` is in Linux's `F_SETFL` mutable set; `O_SYNC` is not.**
-The kernel's `do_fcntl` whitelist (`fs/fcntl.c`) for `F_SETFL` accepts:
-`O_APPEND`, `O_NONBLOCK`, `O_NDELAY`, `O_DIRECT`, `O_NOATIME`,
-`O_ASYNC`. Anything else is silently masked out — meaning a `F_SETFL |
+`fs/fcntl.c` defines `SETFL_MASK` as exactly
+`(O_APPEND | O_NONBLOCK | O_NDELAY | O_DIRECT | O_NOATIME)` and applies
+it as `f_flags = (arg & SETFL_MASK) | (f_flags & ~SETFL_MASK)`.
+`O_ASYNC` is settable too but by a different route — `setfl` calls the
+file operation's `->fasync()` handler, which is responsible for the
+`FASYNC` bit, and only for file types that implement it. Anything
+outside both paths is silently masked out — meaning a `F_SETFL |
 O_SYNC` returns success without actually setting the flag. We do not
 attempt to set `O_SYNC`; durability comes from `fdatasync()` at the
 end of Phase 4.
