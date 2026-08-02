@@ -71,6 +71,7 @@ mod tests {
     /// catches the first half, but only behind `--ignored`; the events
     /// are observable here.
     #[test]
+    #[cfg_attr(miri, ignore)] // unsupported operation 
     fn kernel_sync_disarms_and_closes_its_phase() {
         let path = std::env::temp_dir().join(format!("imi-p6-{}", std::process::id()));
         let file = File::create(&path).expect("temp file");
