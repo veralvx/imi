@@ -1,22 +1,19 @@
-[package]
-name = "imi"
+[workspace]
+members = ["crates/imi", "crates/imi-core"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.7"
-categories = [
-  "command-line-utilities",
-  "command-line-interface",
-  "os::linux-apis",
-  "filesystem",
-  "hardware-support",
-]
 edition = "2024"
-keywords = ["iso", "flasher", "usb", "linux", "direct-io"]
+keywords = ["usb", "iso", "disk", "bootable", "flash"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/veralvx/imi"
 rust-version = "1.97"
-description = "Safely flash ISO/IMG images to USB drives on Linux: O_EXCL device locking, O_DIRECT aligned writes, byte-for-byte verification, transparent gzip/xz/bzip2/zstd decompression."
 
-[dependencies]
+[workspace.dependencies]
+imi-core = { version = "0.1.7", path = "crates/imi-core" }
+
 anyhow = "1.0.103"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = { version = "3.5", features = ["termination"] }
@@ -24,10 +21,11 @@ indicatif = { version = "0.18", default-features = false, features = ["unicode-w
 libc = "0.2"
 nix = { version = "0.31", features = ["fs", "ioctl", "mount", "user"] }
 
-# DO NOT enable parallel/multithreaded features on the four
-# decompressor crates below without re-doing the analysis in
-# `Threading Plan/` — the pipelined flash arm assumes single-threaded
-# decoders (one worker thread owns the whole decode).
+# DO NOT enable parallel/multithreaded features on the four decompressor
+# crates below without re-doing the analysis in
+# `.agents/docs/11-threading.md` — the pipelined flash and verify arms
+# assume single-threaded decoders (one worker thread owns the whole
+# decode).
 bzip2 = "0.6"
 flate2 = "1.0"
 xz2 = "0.1"
@@ -40,18 +38,27 @@ codegen-units = 1
 panic = "unwind" # REQUIRED — do not change to "abort". FlashGuard's Drop-based
 # FATAL warning (AGENTS.md rules 5–6) relies on unwinding;
 # panic="abort" silently disables it for every panic path.
-debug = 1 # 0 | false, 1 | "line-tables-only", 2 | true
+# `debug = 1` here would generate ~10 MB of line tables that `strip`
+# then deletes: nothing extracts them first, so they cost build time and
+# reach no one. Measured on x86-64 Linux — 1,929,824 bytes shipped either
+# way, and the surviving `.debug_gdb_scripts` is a rustc stub, not DWARF.
+debug = 0 # 0 | false, 1 | "line-tables-only", 2 | true
+# `"debuginfo"` and not `"symbols"`: a full strip saves a further 248 KB
+# (12.9%) by dropping `.symtab`, which turns every backtrace frame into a
+# bare address. This crate keeps `panic = "unwind"` specifically so the
+# panic path stays useful to an operator with a half-written device;
+# discarding the function names would undo half of that for 248 KB.
+# Revisit only if symbols are archived elsewhere (a `cargo-dist`
+# debuginfo artifact, or a crash service).
 strip = "debuginfo" # "none" | false, "debuginfo", "symbols" | true
 
-# The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
 
-[[bin]]
-name = "imi"
-path = "src/main.rs"
+[workspace.metadata.release]
+changelog-path = "CHANGELOG.md"
 
-[lints.rust]
+[workspace.lints.rust]
 absolute_paths_not_starting_with_crate = "deny"
 ambiguous-negative-literals = "deny"
 closure-returning-async-block = "warn"
@@ -79,12 +86,7 @@ unused_macro_rules = "warn"
 unused_qualifications = "warn"
 variant_size_differences = "warn"
 
-# unsafe-code = "forbid"
-# must_not_suspend = "warn" # nightly
-# lossy_provenance_casts = "warn" # nightly
-# fuzzy_provenance_casts = "deny" # nightly
-
-[lints.clippy]
+[workspace.lints.clippy]
 cargo = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 restriction = { level = "warn", priority = -1 }
@@ -98,6 +100,9 @@ restriction = { level = "warn", priority = -1 }
 # lints are handled per-site with fixes or `#[expect(..., reason)]`.
 blanket_clippy_restriction_lints = "allow" # the group-enable itself is the documented policy
 
+self_named_module_files = "allow" # house style: `phases.rs` + `phases/`,
+# not `phases/mod.rs`; the mutually
+# exclusive `mod_module_files` stays on
 inline_trait_bounds = "allow"
 inline_modules = "allow"
 
@@ -106,9 +111,23 @@ pub_with_shorthand = "allow" # house style is `pub(crate)`, not `pub(in crate)`
 separated_literal_suffix = "allow" # house style is `4096_u64`; unseparated_literal_suffix stays on
 semicolon_outside_block = "allow" # house style: `unsafe { .. };` — the inside-block pair stays on
 
-# -- inapplicable to a Linux-only std binary ---------------------------
+# -- inapplicable to a Linux-only std project --------------------------
 std_instead_of_core = "allow" # not a no_std/portability crate; libc/nix everywhere
 std_instead_of_alloc = "allow" # same
+
+# -- consequences of `imi-core` having a real public API ---------------
+# These fire once per public item and say nothing about correctness.
+missing_inline_in_public_items = "allow" # inlining across a crate boundary is LTO's job,
+# not something to hand-annotate on ~20 items
+exhaustive_structs = "allow" # `Config` is `#[non_exhaustive]` where evolution is
+exhaustive_enums = "allow" # likely; the rest are plain data whose shape is
+# pinned by the kernel interfaces they mirror
+error_impl_error = "allow" # the crate's error type is named `Error`, as in
+# std::io, serde_json and essentially every
+# other crate; the restriction lint argues
+# against a near-universal convention
+pub_use = "allow" # crate-root re-exports are the API's ergonomics
+module_name_repetitions = "allow" # `phases::phase_0`, `config::Config`
 
 # -- style choices this codebase makes deliberately --------------------
 implicit_return = "allow"
@@ -139,25 +158,3 @@ float_arithmetic = "allow" # floats appear only in human-readable size display
 as_conversions = "allow" # blanket as-ban rejected: the *lossy* cases are
 # caught by the pedantic cast_* lints, which stay
 # enabled and are fixed/expect-ed per site
-
-[package.metadata.docs.rs]
-default-target = "x86_64-unknown-linux-gnu"
-targets = [
-  "x86_64-unknown-linux-gnu",
-  "x86_64-unknown-linux-musl",
-  "aarch64-unknown-linux-gnu",
-]
-
-[package.metadata.binstall]
-pkg-url = "https://github.com/veralvx/{ name }/releases/download/v{ version }/{ name }-{ target }.tar.xz"
-bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
-pkg-fmt = "txz"
-
-[package.metadata.release]
-changelog-path = "CHANGELOG.md"
-
-# [source.crates-io]
-# replace-with = "vendored-sources"
-
-# [source.vendored-sources]
-# directory = "vendor"

@@ -1,0 +1,36 @@
+[package]
+name = "imi"
+version.workspace = true
+categories = [
+  "command-line-utilities",
+  'os::linux-apis',
+  "filesystem",
+  'hardware-support',
+]
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Flash bootable ISO/IMG images to USB drives and SD cards on Linux, with exclusive device locking, O_DIRECT aligned writes, and byte-for-byte verification. Reads gzip, xz, bzip2 and zstd images directly."
+
+[dependencies]
+imi-core.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+indicatif.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "imi"
+path = "src/main.rs"
+
+[package.metadata.binstall]
+pkg-url = "https://github.com/veralvx/{ name }/releases/download/v{ version }/{ name }-{ target }.tar.xz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"

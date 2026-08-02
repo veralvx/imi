@@ -1,0 +1,34 @@
+[package]
+name = "imi-core"
+version.workspace = true
+categories = ["os::linux-apis", "filesystem", "hardware-support"]
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Library for writing disk images to Linux block devices: exclusive O_EXCL locking, O_DIRECT aligned writes, byte-for-byte verification, and gzip/xz/bzip2/zstd decompression. The engine behind the imi USB flasher."
+
+[dependencies]
+libc.workspace = true
+nix.workspace = true
+
+bzip2.workspace = true
+flate2.workspace = true
+xz2.workspace = true
+zstd.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-gnu",
+]
+
+[package.metadata.dist]
+dist = false
