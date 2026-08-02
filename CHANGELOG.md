@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-02
+
+### Added
+
+- Add memcheck recipe and adjust release
+
+### Changed
+
+- Create workspace for lib and cli crates
+- Update documentation to reflect the refactor
+- Update lockfile
+
+### Removed
+
+- Delete stale files
+
 ## [0.1.7] - 2026-07-22
 
 ### Added
@@ -20,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clearer release message
 - Bump actions/checkout from 6 to 7
 - Merge pull request #1 from veralvx/dependabot/github_actions/actions/checkout-7
+- Bump to v0.1.7
 
 ### Removed
 
@@ -95,6 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial commit
 
+[0.2.0]: https://github.com/veralvx/imi/compare/v0.1.7..v0.2.0
 [0.1.7]: https://github.com/veralvx/imi/compare/v0.1.6..v0.1.7
 [0.1.6]: https://github.com/veralvx/imi/compare/v0.1.5..v0.1.6
 [0.1.5]: https://github.com/veralvx/imi/compare/v0.1.4..v0.1.5
