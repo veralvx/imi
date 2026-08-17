@@ -9,7 +9,7 @@ keywords = ["usb", "iso", "disk", "bootable", "flash"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/veralvx/imi"
-rust-version = "1.97"
+rust-version = "1.95"
 
 [workspace.dependencies]
 imi-core = { version = "0.2.0", path = "crates/imi-core" }
@@ -17,6 +17,7 @@ imi-core = { version = "0.2.0", path = "crates/imi-core" }
 anyhow = "1.0.103"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = { version = "3.5", features = ["termination"] }
+dialoguer = { version = "0.12", default-features = false }
 indicatif = { version = "0.18", default-features = false, features = ["unicode-width"] }
 libc = "0.2"
 nix = { version = "0.31", features = ["fs", "ioctl", "mount", "user"] }
@@ -60,26 +61,27 @@ changelog-path = "CHANGELOG.md"
 
 [workspace.lints.rust]
 absolute_paths_not_starting_with_crate = "deny"
-ambiguous-negative-literals = "deny"
-closure-returning-async-block = "warn"
-deref-into-dyn-supertrait = "deny"
-deprecated-in-future = "deny"
-deprecated-safe-2024 = "deny"
+ambiguous_negative_literals = "deny"
+closure_returning_async_block = "warn"
+deref_into_dyn_supertrait = "deny"
+deprecated_in_future = "deny"
+deprecated_safe_2024 = "deny"
 elided_lifetimes_in_paths = "warn"
 explicit_outlives_requirements = "warn"
-if-let-rescope = "warn"
-impl-trait-overcaptures = "warn"
+if_let_rescope = "warn"
+impl_trait_overcaptures = "warn"
 let_underscore_drop = "deny"
 macro_use_extern_crate = "deny"
 missing_copy_implementations = "warn"
+missing_debug_implementations = "warn"
 missing_docs = "warn"
-non-ascii-idents = "deny"
+non_ascii_idents = "deny"
 single_use_lifetimes = "warn"
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
 unreachable_pub = "deny"
 unsafe_op_in_unsafe_fn = "deny"
-unused-crate-dependencies = "deny"
+unused_crate_dependencies = "deny"
 unused_import_braces = "warn"
 unused_lifetimes = "warn"
 unused_macro_rules = "warn"
