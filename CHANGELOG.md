@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-17
+
+### Added
+
+- Add justfile recipes
+
+### Changed
+
+- Bump clap in the rust-dependencies group (#2)
+- Bump versions
+- 1.95 MRSV
+- Lower MSRV to 1.95
+- Update README
+- Update docs for agents
+- Exclude files for git
+- Lower MSRV to 1.95
+- Apply formatting
+- Apply formatting
+- Replace runtime checks by typestate pattern and pairing
+
+### Fixed
+
+- Ignore test for miri
+
+### Removed
+
+- Delete stale documentation and helpers
+
 ## [0.2.0] - 2026-08-02
 
 ### Added
@@ -16,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Create workspace for lib and cli crates
 - Update documentation to reflect the refactor
 - Update lockfile
+- Bump to v0.2.0
 
 ### Removed
 
@@ -112,6 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial commit
 
+[0.3.0]: https://github.com/veralvx/imi/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/veralvx/imi/compare/v0.1.7..v0.2.0
 [0.1.7]: https://github.com/veralvx/imi/compare/v0.1.6..v0.1.7
 [0.1.6]: https://github.com/veralvx/imi/compare/v0.1.5..v0.1.6
