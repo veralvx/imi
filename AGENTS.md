@@ -481,8 +481,8 @@ cargo mutants -p imi-core --in-place --file crates/imi-core/src/error.rs
 
 ### Branches gated on device state
 
-The recurring blind spot in this project is not untested *code*, it is
-untested *device state*. Every fixture flashes a clean loop device, so
+The recurring blind spot in this project is not untested _code_, it is
+untested _device state_. Every fixture flashes a clean loop device, so
 any branch that needs a mount, a swap area, a stacked volume or a
 reappearing automount never executes — and a change to it passes every
 gate. That is how the mount-path wording changed unnoticed, and how the
@@ -492,14 +492,14 @@ Instrumented coverage would find these directly, but `llvm-tools` is not
 installed here, so the substitute is to enumerate the states the code
 branches on and ask which fixture produces each:
 
-| state | how a test creates it | covered by |
-| --- | --- | --- |
-| mounted target | `mkfs.ext4` + `mount` under `/run/media` | `phase_1_unmounts_a_mounted_target` |
-| active swap | `mkswap` + `swapon` | `phase_1_disables_swap_on_the_target` |
-| claimed device | Phase 2, then a second `O_EXCL` open | `the_phase_2_claim_excludes_other_openers` |
-| device changed after probe | `truncate` + `losetup -c` | `a_device_that_changes_size_after_probing_is_refused` |
-| device ≠ image | flash, then alter the image | `verification_detects_a_device_that_does_not_match_the_image` |
-| interrupted mid-write | `--throttle` + `SIGINT` to a child | `an_interrupted_flash_warns_that_the_device_is_unsafe` |
+| state                      | how a test creates it                    | covered by                                                    |
+| -------------------------- | ---------------------------------------- | ------------------------------------------------------------- |
+| mounted target             | `mkfs.ext4` + `mount` under `/run/media` | `phase_1_unmounts_a_mounted_target`                           |
+| active swap                | `mkswap` + `swapon`                      | `phase_1_disables_swap_on_the_target`                         |
+| claimed device             | Phase 2, then a second `O_EXCL` open     | `the_phase_2_claim_excludes_other_openers`                    |
+| device changed after probe | `truncate` + `losetup -c`                | `a_device_that_changes_size_after_probing_is_refused`         |
+| device ≠ image             | flash, then alter the image              | `verification_detects_a_device_that_does_not_match_the_image` |
+| interrupted mid-write      | `--throttle` + `SIGINT` to a child       | `an_interrupted_flash_warns_that_the_device_is_unsafe`        |
 
 Still unreachable here: stacked volumes (LVM/md/dm holders) and an
 automount that reappears during Phase 7's retry loop. Both need
@@ -539,22 +539,22 @@ Every file swept with `--in-place`, integrity-checked after each run.
 Use this to spot a regression: a new survivor outside the three
 categories below is a real gap.
 
-| file | caught | missed | survivors are |
-| --- | --- | --- | --- |
-| `error.rs` | 8 | 0 | — |
-| `events.rs` `config.rs` `context.rs` | 11 | 0 | — |
-| `mount.rs` | 27 | 7 | 4 I/O wrappers, 2 equivalent, 1 wrapper |
-| `guard.rs` `identity.rs` `aligned.rs` | 30 | 3 | 2 `Drop`, 1 hardware |
-| `image.rs` `sysfs.rs` | 18 | 5 | 1 equivalent, 4 need device nodes |
-| `phase_0.rs` | 22 | 2 | `phase0_root_check`, both directions |
-| `phase_1.rs` | 0 | 0 | — (a no-op branch was removed rather than covered) |
-| `phase_2.rs` | 1 | 1 | 1 equivalent (`O_EXCL`/`O_CLOEXEC` bits are disjoint) |
-| `phase_3.rs` | 6 | 2 | whole-function, need a device |
-| `phase_4.rs` | 14 | 1 | 1 equivalent (`<` vs `<=` before an empty read) |
-| `phase_5.rs` | 11 | 3 | whole-function, need a device |
-| `phase_6.rs` | 1 | 0 | — |
-| `phase_7.rs` | 3 | 0 | — |
-| `imi` (binary) | 28 | 12 | methods that only print; `confirm` needs a tty |
+| file                                  | caught | missed | survivors are                                         |
+| ------------------------------------- | ------ | ------ | ----------------------------------------------------- |
+| `error.rs`                            | 8      | 0      | —                                                     |
+| `events.rs` `config.rs` `context.rs`  | 11     | 0      | —                                                     |
+| `mount.rs`                            | 27     | 7      | 4 I/O wrappers, 2 equivalent, 1 wrapper               |
+| `guard.rs` `identity.rs` `aligned.rs` | 30     | 3      | 2 `Drop`, 1 hardware                                  |
+| `image.rs` `sysfs.rs`                 | 18     | 5      | 1 equivalent, 4 need device nodes                     |
+| `phase_0.rs`                          | 22     | 2      | `phase0_root_check`, both directions                  |
+| `phase_1.rs`                          | 0      | 0      | — (a no-op branch was removed rather than covered)    |
+| `phase_2.rs`                          | 1      | 1      | 1 equivalent (`O_EXCL`/`O_CLOEXEC` bits are disjoint) |
+| `phase_3.rs`                          | 6      | 2      | whole-function, need a device                         |
+| `phase_4.rs`                          | 14     | 1      | 1 equivalent (`<` vs `<=` before an empty read)       |
+| `phase_5.rs`                          | 11     | 3      | whole-function, need a device                         |
+| `phase_6.rs`                          | 1      | 0      | —                                                     |
+| `phase_7.rs`                          | 3      | 0      | —                                                     |
+| `imi` (binary)                        | 28     | 12     | methods that only print; `confirm` needs a tty        |
 
 Phases 1 through 7 were measured during the file-by-file review; the
 earlier rows predate it. Four of those rows moved because the review
@@ -574,7 +574,7 @@ Three categories, and only a fourth would be a defect:
 2. **I/O wrappers.** A function that reads a fixed path and delegates to
    a tested pure core. Make the core testable, not the wrapper.
 
-   The trap is applying this to something that only *feeds* I/O. Ask
+   The trap is applying this to something that only _feeds_ I/O. Ask
    whether the function can be wrong in a way observable without the
    syscall. `blkflsbuf(fd)` cannot — its body is the ioctl. `as_raw_fd`
    can: it promises "this guard's descriptor", checkable against the
@@ -582,7 +582,7 @@ Three categories, and only a fourth would be a defect:
    here as accepted until that was noticed, and the replacement value is
    fd 0 — stdin, which Phase 6 would have issued `BLKRRPART` against.
    `sysfs`'s `pub(crate)` wrappers were the same shape. The killing
-   assertion is *not* that each agrees with its `_in` variant, which is
+   assertion is _not_ that each agrees with its `_in` variant, which is
    what this note first said and is worthless: a pure delegation agrees
    with itself whatever root it passed, because both sides move together.
    The independent oracle is `/sys/class/block` itself — probe it and
@@ -597,7 +597,7 @@ Three categories, and only a fourth would be a defect:
    and `dm_uuid -> None` needs a device-mapper device. A container with
    only whole-disk loop devices cannot produce any of the three, and the
    root-gated suite that could is not what `cargo mutants` runs. The
-   distinction from category 2 is whether the environment *could* answer
+   distinction from category 2 is whether the environment _could_ answer
    differently, not whether the function looks trivial.
 
    `FlashGuard::drop` used to be listed here and no longer belongs: the
@@ -740,7 +740,7 @@ Resolved. A pty capture of a 32 MiB flash is **3395 bytes and 17 frames
 both before and after**, with the identical sequence
 `12→25→38→50→62→75→88→100→100 | 12→25→38→50→62→75→88→100` and identical
 cursor control. The only difference left is the rate figure's unit, and
-that number varies elevenfold between runs of the *same* binary, so it
+that number varies elevenfold between runs of the _same_ binary, so it
 is not a property of the code.
 
 Three defects were found getting here, each by comparing frame
@@ -764,6 +764,6 @@ total to render a percentage against, so the closing byte count is the
 only completion signal a compressed flash gives. Left as is.
 
 Method that found it: extract the percentage from every frame in both
-captures and diff the *sequences*. Comparing the first or final rate
+captures and diff the _sequences_. Comparing the first or final rate
 tells you nothing — run the old binary three times and watch it
 disagree with itself.
