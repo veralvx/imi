@@ -288,7 +288,7 @@ For raw images (known total) — a unified percent bar shared with
 Phase 5b verification:
 
 ```
-[==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
+   [==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
 ```
 
 Five fixed components: bar, percent (right-aligned to 3 columns for
@@ -305,7 +305,7 @@ For compressed images (unknown decompressed size) — a spinner with byte
 count, since `{percent}` and `{total_bytes}` aren't meaningful:
 
 ```
-⠋ 200.00 MiB written (4.00 MiB/s)
+   ⠋ 200.00 MiB written (4.00 MiB/s)
 ```
 
 Both use `{bytes_per_sec}` (the standard token, which already routes

@@ -22,23 +22,23 @@ design that answers the same questions this document answers.
 For one 4 MiB chunk, the two costs that could overlap are decompression
 (CPU) and device I/O (not CPU). Serial cost per chunk is
 `read + write`; pipelined cost is `max(read, write)`. The saving is
-therefore bounded by the _shorter_ of the two, which is what decides
+therefore bounded by the *shorter* of the two, which is what decides
 where threading is worth its complexity.
 
 The figures below are inherited from the pre-implementation design notes
 and were measured on real USB hardware, which this repository's test
-environment does not have. Treat the _shape_ — which column dominates —
+environment does not have. Treat the *shape* — which column dominates —
 as the durable part; the absolute numbers are a decade-old hardware
 generation away from being re-checkable here.
 
-| Stage                      | Time, NVMe source → USB 3.0 target | CPU-bound?                       |
-| -------------------------- | ---------------------------------- | -------------------------------- |
-| `fill_buffer`, raw         | <1 ms                              | no — disk read                   |
-| `fill_buffer`, gzip / zstd | ~2–5 ms                            | modestly                         |
-| `fill_buffer`, xz          | ~15–40 ms                          | **yes, comparable to the write** |
-| `fill_buffer`, bzip2       | ~30–80 ms                          | **yes, typically exceeds it**    |
-| `write_direct`, USB 3.0    | ~30–50 ms                          | no — USB controller              |
-| `write_direct`, USB 2.0    | ~120–150 ms                        | no — USB controller              |
+| Stage | Time, NVMe source → USB 3.0 target | CPU-bound? |
+| --- | --- | --- |
+| `fill_buffer`, raw | <1 ms | no — disk read |
+| `fill_buffer`, gzip / zstd | ~2–5 ms | modestly |
+| `fill_buffer`, xz | ~15–40 ms | **yes, comparable to the write** |
+| `fill_buffer`, bzip2 | ~30–80 ms | **yes, typically exceeds it** |
+| `write_direct`, USB 3.0 | ~30–50 ms | no — USB controller |
+| `write_direct`, USB 2.0 | ~120–150 ms | no — USB controller |
 
 Raw images have no meaningful read cost, so they stay serial and see no
 change. That is why dispatch is on `comp.is_compressed()` and not on a
@@ -180,7 +180,7 @@ The order is load-bearing:
    worker parked in `free_rx.recv()` waiting for a buffer will wait
    forever unless the sender is gone. Skipping this deadlocks the join.
 3. **Join before reporting.** The worker owns the `ImageReader`; the
-   error the main thread is about to return may be _caused_ by
+   error the main thread is about to return may be *caused* by
    something the worker saw.
 4. **`resume_unwind` last, after the channels are closed.** A worker
    panic is captured and re-raised on the main thread so that
@@ -230,8 +230,8 @@ returning `Ok` on a disconnect.
 
 **Phase 4.** EOF is in-band: a short fill. An image that is an exact
 `BUF_SIZE` multiple ends with a `(buf, 0)` handoff. Every voluntary
-worker exit therefore sends a final item first, so a disconnect _with a
-clean join_ means a chunk went missing — reported as a pipeline protocol
+worker exit therefore sends a final item first, so a disconnect *with a
+clean join* means a chunk went missing — reported as a pipeline protocol
 violation rather than treated as end-of-image. Treating it as EOF would
 return SUCCESS over a partially flashed device.
 
@@ -248,14 +248,14 @@ that the two are distinguishable, because "the image ended early" and
 They are deliberately the same shape, and the differences are only where
 the work differs.
 
-|                   | Phase 4 flash     | Phase 5b verify                 |
-| ----------------- | ----------------- | ------------------------------- |
-| worker owns       | the `ImageReader` | a **reopened** `ImageReader`    |
-| worker paces by   | image EOF         | `bytes_written` from Phase 4    |
-| main thread holds | nothing extra     | its own `dev_buf`, never shared |
-| per-chunk helper  | `process_chunk`   | `compare_chunk`                 |
-| device call       | `write_all_at`    | `read_exact_at`                 |
-| finaliser         | `flash_finalize`  | `verify_finalize`               |
+| | Phase 4 flash | Phase 5b verify |
+| --- | --- | --- |
+| worker owns | the `ImageReader` | a **reopened** `ImageReader` |
+| worker paces by | image EOF | `bytes_written` from Phase 4 |
+| main thread holds | nothing extra | its own `dev_buf`, never shared |
+| per-chunk helper | `process_chunk` | `compare_chunk` |
+| device call | `write_all_at` | `read_exact_at` |
+| finaliser | `flash_finalize` | `verify_finalize` |
 
 Verify reopens the image because decompressors do not implement `Seek` —
 there is no rewinding the Phase 4 reader. And the main thread issues its

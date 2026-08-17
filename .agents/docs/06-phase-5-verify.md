@@ -231,7 +231,7 @@ throttle rate.
 Identical template to Phase 4 (raw image case):
 
 ```
-[==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
+   [==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
 ```
 
 Five fixed components: bar, percent (right-aligned to 3 columns),

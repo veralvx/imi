@@ -7,6 +7,28 @@ section of the pipeline emits a loud, _phase-honest_ warning to the
 operator that the device is partially flashed. Hold the `O_EXCL` claim
 for the entire flash + verify window.
 
+## Two types, not one
+
+Since the typestate split there are two: `FlashGuard`, which holds the
+`O_EXCL` claim and is not armed, and `ArmedGuard`, which is what Phase 3
+returns and what Phases 4, 5 and 6 accept. Everything below about
+arming, phases and the FATAL notice describes an `ArmedGuard`; a bare
+`FlashGuard` has none of it and drops silently.
+
+That is the whole enforcement. Phases 4 and 5 take `&mut ArmedGuard`,
+which only `FlashGuard::arm` produces, so reaching them without Phase 3
+does not compile — verified against an external consumer crate, where
+skipping Phase 3 gives `E0308: expected &mut ArmedGuard, found &mut
+FlashGuard`. Two tests used to assert that refusal at runtime; neither
+can be written now.
+
+`ArmedGuard` wraps `Option<FlashGuard>` rather than owning the fields.
+That keeps `FlashGuard`'s `Drop` as the single definition of the notice,
+lets `ArmedGuard` have no `Drop` of its own, and lets `disarm` take the
+inner value out without `unsafe` — `ManuallyDrop::take` being the
+alternative, and an unsafe block a poor price for deleting a
+`debug_assert`.
+
 ## The three responsibilities
 
 `FlashGuard` does three distinct things:
@@ -105,35 +127,61 @@ other than `Disarmed`. The arrows from intermediate states to "Disarmed
 completes (or when the operator passed `--skip-verification` and only the
 cooldown ran).
 
-## Two guard APIs that exist for testability
+## The helpers that exist for testability
 
 The FATAL notice is written to stderr from `Drop`, which no in-process
-test can observe. Two helpers make the decision behind it assertable:
+test can observe. Three helpers make the decision behind it assertable.
+
+All three are crate-internal. `FlashGuard::current_phase` and
+`would_warn_on_drop` were public until the typestate split made them
+constants: `arm` consumes the guard and `disarm` clears the phase, so
+every `FlashGuard` a consumer can hold reports `Disarmed` and would not
+warn. What a caller actually wants to know — is this run inside the
+destructive window — is now answered by which type they are holding, and
+`ArmedGuard::current_phase` is the public accessor for *which* armed
+phase.
 
 - `current_phase()` — the phase the guard would report if dropped now,
   so the arm/set_phase/disarm transitions can be checked directly.
-- `would_warn_on_drop()` — exactly what `Drop` consults. Inverting it
-  would mean staying silent on a half-written device and warning on a
-  clean one; a test pins the polarity.
+- `would_warn_on_drop()` — what `fatal_notice` consults, and through it
+  what `Drop` does. Inverting it would mean staying silent on a
+  half-written device and warning on a clean one; a test pins the
+  polarity.
+- `fatal_notice()` — the notice `Drop` would print, or `None`. Split out
+  so the decision and the wording are testable without a process that
+  can observe stderr: before the split, `replace drop with ()` survived
+  mutation testing, because the only test that watched the notice is
+  root-gated and `cargo mutants` does not run `--ignored`.
 
-A third, `ensure_device_is(expected)`, is a safety check rather than a
-testability aid. Phases 3, 4 and 5 each receive a guard and a `Target`
-separately and nothing in the type system ties them together, so a
-caller of the public per-phase API driving two devices could cross them
-and write one image onto the other. Those phases call it first and
-refuse a mismatch before anything destructive happens.
+`ensure_device_is(expected)` used to be a third, and is gone. Phases 3,
+4 and 5 each received a guard and a `Target` separately, nothing in the
+types tied them together, and a caller of the public per-phase API
+driving two devices could cross them and write one image onto the other.
+Those phases called it first and refused.
+
+The pairing is now structural: Phase 2 returns a `Session`, which holds
+the guard and the target it claimed, and Phases 3 to 6 take that. There
+is no second `Target` parameter for a mismatched one to occupy, so the
+check had nothing left to check — verified against an external consumer
+crate, where the crossed call fails with `E0061`, wrong number of
+arguments, rather than compiling and being refused at runtime.
+
+Both definitions were deleted rather than kept as a backstop.
+`FlashGuard::new` is `pub(crate)`, so a consumer's only guard comes from
+Phase 2, which now returns it already paired: the method was unreachable
+rather than merely unused.
 
 ## Where each transition fires (in the phase pipelines)
 
-| Transition              | Source location                                                                                                                                                                                                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `new(file, dev_path)`   | end of Phase 2, just acquired `O_EXCL`                                                                                                                                                                                                                                                            |
-| `arm(WipingSignatures)` | start of Phase 3                                                                                                                                                                                                                                                                                  |
-| `set_phase(Writing)`    | start of Phase 4                                                                                                                                                                                                                                                                                  |
-| `set_phase(Cooldown)`   | start of Phase 5a                                                                                                                                                                                                                                                                                 |
-| `set_phase(Verifying)`  | start of Phase 5b                                                                                                                                                                                                                                                                                 |
-| `disarm()`              | **start of Phase 6** (`phase_6.rs`), the only phase that disarms — though `into_file()` disarms again on its way out, and either alone suppresses the notice. Which phase last ran before it depends on the skip flags: Phase 5b normally, Phase 5a with `--skip-verification`, Phase 4 with both |
-| `into_file()`           | end of Phase 6                                                                                                                                                                                                                                                                                    |
+| Transition              | Source location                                                                                                                                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `new(file, dev_path)`   | end of Phase 2, just acquired `O_EXCL`                                                                                                                                                         |
+| `arm(WipingSignatures)` | start of Phase 3                                                                                                                                                                               |
+| `set_phase(Writing)`    | start of Phase 4                                                                                                                                                                               |
+| `set_phase(Cooldown)`   | start of Phase 5a                                                                                                                                                                              |
+| `set_phase(Verifying)`  | start of Phase 5b                                                                                                                                                                              |
+| `disarm()`              | **start of Phase 6** (`phase_6.rs`), which consumes the `ArmedGuard` and yields a `FlashGuard`. It is the only caller, and there is no second one to drift from: the method exists on `ArmedGuard` alone. Which phase last ran before it depends on the skip flags: Phase 5b normally, Phase 5a with `--skip-verification`, Phase 4 with both |
+| `into_file()`           | end of Phase 6                                                                                                                                                                                 |
 
 `set_phase` requires the guard to already be armed (debug-asserted).
 That makes "I forgot to call `arm()` first and the warning never fires"
@@ -142,19 +190,24 @@ a panic in debug builds, not a silent safety hole.
 ## The Drop implementation
 
 ```rust
+fn fatal_notice(&self) -> Option<String> {
+    if !self.would_warn_on_drop() {
+        return None;
+    }
+    Some(format!(
+        "\n⚠  FATAL: flash interrupted while {} was {}. \
+         The device is in an inconsistent state. DO NOT REMOVE IT. \
+         Re-run imi to recover.",
+        self.dev_path.display(),
+        self.current_phase().interrupted_verb()
+    ))
+}
+
 impl Drop for FlashGuard {
     fn drop(&mut self) {
-        let phase = self.current_phase();
-        if self.would_warn_on_drop() {
+        if let Some(notice) = self.fatal_notice() {
             let mut err = io::stderr().lock();
-            let _notice = writeln!(
-                err,
-                "\n⚠  FATAL: flash interrupted while {} was {}. \
-                 The device is in an inconsistent state. DO NOT REMOVE IT. \
-                 Re-run imi to recover.",
-                self.dev_path.display(),
-                phase.interrupted_verb()
-            );
+            let _notice = writeln!(err, "{notice}");
             let _flushed = err.flush();
         }
         // `self.file` (if still `Some`) drops here, releasing the claim.
@@ -173,7 +226,7 @@ Notes:
   The `from_u8_round_trips_known_phases` test pins both the round-trip
   and the fail-loud fallback.
 - **`writeln!` with the result discarded, never `eprintln!`.** This is
-  not a style preference. `eprintln!` _panics_ if the write fails — a
+  not a style preference. `eprintln!` *panics* if the write fails — a
   closed or full stderr, an `EPIPE` from a dead pager. This code runs
   from `Drop`, and the case it exists for is unwinding, where a second
   panic aborts the process immediately. That abort would skip this very
@@ -268,7 +321,7 @@ if those fail, the 4 MiB buffers failed first.
 ## Why arm comes before the wipe call, not after
 
 ```rust
-guard.arm(ArmedPhase::WipingSignatures);    // ← here, before
+let armed = guard.arm(ArmedPhase::WipingSignatures);    // ← here, before
 println!("Wiping partition signatures...");
 wipe_ends(guard, target.dev_size)?;   // phase_3
 ```

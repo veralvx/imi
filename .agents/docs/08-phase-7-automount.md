@@ -90,7 +90,7 @@ Three things in that shape are load-bearing and easy to lose.
 Ctrl+C as a failure. The sleeps are `cancellable_sleep`, not
 `thread::sleep`, so Ctrl+C is noticed within 100 ms rather than up to
 two seconds. And the reporting goes through `Events` — the library
-writes nothing to a terminal; the `warning:` prefix and the `->`
+writes nothing to a terminal; the `warning:` prefix and the ` -> `
 before an action are the binary's rendering.
 
 `final_verdict` is a separate pure function so the decision that ends the

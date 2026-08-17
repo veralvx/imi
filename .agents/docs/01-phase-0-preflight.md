@@ -23,23 +23,23 @@ are kept pure and unit-tested; `run` does the I/O and calls them. When
 adding a check, follow the same split (see _Keeping safety decisions
 testable_ in `AGENTS.md`).
 
-| decision                               | function                       |
-| -------------------------------------- | ------------------------------ |
-| image and target are the same path     | `ensure_distinct_paths`        |
-| device below the head+tail wipe floor  | `ensure_device_large_enough`   |
-| raw image larger than the device       | `ensure_image_fits`            |
-| target is a block device               | `ensure_block_device`          |
-| image is a regular file                | `ensure_image_is_regular_file` |
-| target is physical or a loop device    | `ensure_physical_or_loop`      |
-| image is the target's own backing file | `is_same_file`                 |
-| may we destroy this device             | `confirm_destruction`          |
+| decision                                   | function                     |
+| ------------------------------------------ | ---------------------------- |
+| image and target are the same path         | `ensure_distinct_paths`      |
+| device below the head+tail wipe floor      | `ensure_device_large_enough` |
+| raw image larger than the device           | `ensure_image_fits`          |
+| target is a block device                   | `ensure_block_device`        |
+| image is a regular file                    | `ensure_image_is_regular_file` |
+| target is physical or a loop device        | `ensure_physical_or_loop`    |
+| image is the target's own backing file     | `is_same_file`               |
+| may we destroy this device                 | `confirm_destruction`        |
 
 The size figure on the banner moved to the binary with the banner
 itself (`crates/imi/src/ui.rs::human_size`, which scales to the largest
 binary unit that stays readable rather than always using GiB), and its
 test went with it.
 
-What remains device-bound is the _plumbing_, not the decisions:
+What remains device-bound is the *plumbing*, not the decisions:
 `ensure_whole_disk` and `ensure_image_not_on_target` read sysfs and then
 call the pure checks above; `query_dev_geometry_readonly` and
 `target_block_subtree` need a live fd. Those wrappers are covered by the

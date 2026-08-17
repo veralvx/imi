@@ -79,14 +79,16 @@ half-wiped layout.
 ## When the guard arms
 
 ```rust
-guard.ensure_device_is(&target.dev_canon)?;   // refuse a crossed pairing
-guard.arm(ArmedPhase::WipingSignatures);      // ← here
+// No pairing check: a Session *is* the guard and its target, so there
+// is no crossed pairing to refuse.
+let dev_size = session.target().dev_size;     // read before `arm` consumes
+let armed = session.arm(ArmedPhase::WipingSignatures);    // ← here
 events.phase_started(UiPhase::Wipe);          // the binary renders it
-wipe_ends(guard, target.dev_size)?;
+wipe_ends(armed.guard(), dev_size)?;
 ```
 
 `arm` takes `ArmedPhase`, not `GuardPhase`: `GuardPhase` is the public
-enum that includes `Disarmed`, and a guard cannot be armed _into_ the
+enum that includes `Disarmed`, and a guard cannot be armed *into* the
 disarmed state. The library emits `phase_started` rather than printing —
 the "Wiping partition signatures..." line is the binary's rendering of
 that event.
