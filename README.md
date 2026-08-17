@@ -40,7 +40,7 @@ USB write. Raw images stay single-threaded (their read cost is negligible).
 
 - Linux (kernel 2.6.26 or later — needs `/proc/self/mountinfo`).
 - Root privileges (`sudo`).
-- Rust 1.97+ to build from source.
+- Rust 1.95+ to build from source.
 
 ## Install
 
@@ -95,11 +95,11 @@ sudo imi --img image.iso --dev /dev/sdc --throttle 8M
 ```
 Safely flash an ISO/IMG (optionally compressed) to a USB block device.
 
-Usage: imi [OPTIONS] --img <PATH> --dev <DEVICE>
+Usage: imi [OPTIONS] --img <PATH>
 
 Options:
   -i, --img <PATH>         Path to the source .iso/.img file (may be gzip/xz/bzip2/zstd compressed)
-  -d, --dev <DEVICE>       Target block device, e.g. /dev/sdc. Must be a whole disk, not a partition
+  -d, --dev <DEVICE>       Target block device, e.g. /dev/sdc. Must be a whole disk, not a partition. Omit to pick interactively: candidate devices are listed (path, size, model; removable first) for arrow-key selection. Only whole disks with media, no block-layer holders, and no mounts outside /media, /run/media, /var/run/media are offered, so the system disk never appears. Esc aborts; without a terminal the candidates are printed and the run refuses. Nothing is ever auto-selected
   -t, --throttle [<RATE>]  Write/read rate cap (e.g. 500K, 8M, 1G). Omit flag entirely for unthrottled; pass `-t` with no value to default to 8M
   -y, --yes                Skip the interactive TTY confirmation. Intended for automation; use with care
       --skip-verification  Skip Phase 5b byte-for-byte verification. The hardware cooldown (Phase 5a, unless --skip-cooldown), kernel partition-table sync (Phase 6), and automount defense (Phase 7) all still run — only the readback compare is omitted. Use this when you trust the device and the throughput gain is worth the loss of the defect-detection pass
@@ -114,17 +114,17 @@ Options:
 leaves the device untouched (phases 0–2) or prints a `FATAL` warning describing
 the interrupted state (phases 3–5b).
 
-| Phase | What happens                                                                                                                                                                                                         |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Validates the image (regular file, detected compression) and the target (whole disk, not a partition, not write-protected, no LVM/dm-crypt/MD/zram stack).                                                           |
+| Phase | What happens                                                                                                                                                                                        |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | Validates the image (regular file, detected compression) and the target (whole disk, not a partition, not write-protected, no LVM/dm-crypt/MD/zram stack).                                          |
 | 1     | Parses `/proc/self/mountinfo` and `/proc/swaps`; unmounts auto-mounted filesystems under `/media`, `/run/media` or `/var/run/media`; disables swap on the device. Refuses filesystems mounted outside the whitelist. |
-| 2     | Opens the device with `O_EXCL` (kernel-level exclusive claim), then re-reads mounts to catch anything that raced the open.                                                                                           |
-| 3     | Arms the interrupt guard. Wipes the first and last 1 MiB to destroy stale GPT/MBR/PMBR signatures.                                                                                                                   |
-| 4     | Writes the image in 4 MiB `O_DIRECT` chunks. Compressed images decompress on a worker thread; raw images write single-threaded.                                                                                      |
-| 5a    | 10-second cooldown for USB-NAND FTL cache drain (`--skip-cooldown` skips).                                                                                                                                           |
-| 5b    | Reads back every written byte under the same lock and compares against a fresh decompress of the source image (`--skip-verification` skips).                                                                         |
-| 6     | Issues `BLKRRPART` so the kernel re-reads the new partition table, then drops the `O_EXCL` lock.                                                                                                                     |
-| 7     | Sweeps for desktop auto-mounts that fired between lock release and process exit.                                                                                                                                     |
+| 2     | Opens the device with `O_EXCL` (kernel-level exclusive claim), then re-reads mounts to catch anything that raced the open.                                                                          |
+| 3     | Arms the interrupt guard. Wipes the first and last 1 MiB to destroy stale GPT/MBR/PMBR signatures.                                                                                                  |
+| 4     | Writes the image in 4 MiB `O_DIRECT` chunks. Compressed images decompress on a worker thread; raw images write single-threaded.                                                                     |
+| 5a    | 10-second cooldown for USB-NAND FTL cache drain (`--skip-cooldown` skips).                                                                                                                          |
+| 5b    | Reads back every written byte under the same lock and compares against a fresh decompress of the source image (`--skip-verification` skips).                                                        |
+| 6     | Issues `BLKRRPART` so the kernel re-reads the new partition table, then drops the `O_EXCL` lock.                                                                                                    |
+| 7     | Sweeps for desktop auto-mounts that fired between lock release and process exit.                                                                                                                    |
 
 ## Testing
 
