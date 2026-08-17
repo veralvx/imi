@@ -6,7 +6,7 @@ default:
 #   just ub            -> everything
 #   just ub aligned    -> filter to matching tests
 ub filter='':
-    ./.agents/ub-check.sh {{filter}}
+    ./.agents/tools/ub-check.sh {{filter}}
 
 
 cargo-check:
@@ -17,6 +17,24 @@ test:
   cargo test --workspace --all-features
   sudo cargo test --workspace --all-features -- --ignored
   #cargo test --workspace --no-default-features
+
+# Run the suite as an unprivileged user.
+#
+# The development container is root, which hides any test that only
+# passes because of it. One did: a chain-walk assertion that reached a
+# wrapped io::Error as root and the root refusal — which wraps nothing —
+# as anyone else. It passed here and failed for the first person to run
+# `cargo test` normally.
+test-unprivileged:
+    cargo test --workspace --no-run 2>&1 \
+      | grep -oE 'target/debug/deps/[a-z_]+-[0-9a-f]+' | sort -u > /tmp/imi-bins
+    chmod -R a+rX target/debug/deps .
+    while read -r b; do \
+      [ -x "$b" ] || continue; \
+      printf '%-24s ' "$(basename "$b" | sed 's/-[0-9a-f]*$//')"; \
+      setpriv --reuid=65534 --regid=65534 --clear-groups "$b" 2>&1 \
+        | grep -oE '[0-9]+ passed; [0-9]+ failed' | head -1; \
+    done < /tmp/imi-bins
 
 clippy: 
   #!/bin/sh
