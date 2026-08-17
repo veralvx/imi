@@ -6,7 +6,7 @@ Thank you for considering contributing to `imi`!
 
 To build and test `imi` locally, you will need the following tools:
 
-- **Rust:** Version 1.97 or later (stable; pinned in `rust-toolchain.toml`).
+- **Rust:** Version 1.95 or later (stable; pinned in `rust-toolchain.toml`).
 - **Just:** A command runner for our project automation.
 - **Dprint:** Used for standardizing markdown and JSON formatting.
 - **Cocogitto:** Used to enforce Conventional Commits.
