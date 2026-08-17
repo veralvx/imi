@@ -1,8 +1,11 @@
-target/
-*.iso
-*.img
-.env
-log.log
+/target
+/mutants.out
 log.txt
-vendor/
-.drafts/
+*.iso
+
+# Python bytecode from .agents/ tooling
+__pycache__/
+*.pyc
+
+
+.agents/tools
