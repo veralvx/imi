@@ -12,7 +12,7 @@ auto-mount the device normally.
 released. Phases 3 to 5 only ever `set_phase`, so this is the only
 phase that disarms.
 
-It is not the only *call* site, though: `into_file()` disarms again on
+It is not the only _call_ site, though: `into_file()` disarms again on
 its way to taking the `File` out, a few lines below. The two are
 redundant, and that is the point — **either one alone suppresses the
 notice**, so both would have to be lost before a finished device started
@@ -76,7 +76,7 @@ _whole disk_ prevents any partition open from succeeding (the kernel
 rejects with `EBUSY` while we hold the claim), so during the entire
 flash + verify window it should be 0.
 
-The third branch is worth noticing: a caller that is *not* already
+The third branch is worth noticing: a caller that is _not_ already
 holding an exclusive claim makes the kernel take one on its behalf for
 the duration of the scan. We pass `BLK_OPEN_EXCL`, so that is skipped —
 we are already the claimant.

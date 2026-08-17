@@ -95,7 +95,7 @@ this, not against the block above:
   On a TTY it settles to `Cooldown and FTL sync...`; in a byte stream it
   arrives as every frame, CR-separated, ending with a final frame padded
   with spaces to erase the last countdown:
-  `\rCooldown and FTL sync... (10s)   \r...(1s)   \rCooldown and FTL sync...          `.
+  `\rCooldown and FTL sync... (10s)   \r...(1s)   \rCooldown and FTL sync...`.
   There is no `done` token. Parsers wanting the cooldown's end should
   match the CR-delimited frame with no `(Ns)` in it, or simply wait for
   the next phase line.
@@ -218,7 +218,7 @@ if self.bar_started {
 ```
 
 Creating the bar lazily on that first `progress` instead would start the
-clock *after* the first chunk had arrived, and the rate would then be
+clock _after_ the first chunk had arrived, and the rate would then be
 computed over a near-zero window: a 3 MiB image once reported
 21.91 GiB/s that way.
 
@@ -238,7 +238,7 @@ Phase 4 (flash, raw image) and Phase 5b (verify) both render with the
 **same** template:
 
 ```
-   [{bar:40}] {percent:>3}%  {bytes} / {total_bytes} ({bytes_per_sec})
+[{bar:40}] {percent:>3}%  {bytes} / {total_bytes} ({bytes_per_sec})
 ```
 
 The three leading spaces are part of the constant, not this document's
@@ -254,8 +254,8 @@ bar that does not look like the samples below.
 producing lines like:
 
 ```
-   [==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
-   [=============================>          ]  75%  762.94 MiB / 1.00 GiB (1.81 GiB/s)
+[==================>                     ]  47%  476.84 MiB / 1.00 GiB (1.35 GiB/s)
+[=============================>          ]  75%  762.94 MiB / 1.00 GiB (1.81 GiB/s)
 ```
 
 Five components in fixed positions: a 40-cell bar in brackets, a
@@ -291,7 +291,7 @@ The `--yes` bypass exists for automation, but the default path opens
 
 The accepted answer is `yes` after trimming: `input.trim() == "yes"`.
 Surrounding whitespace and the terminal's `\r\n` are stripped, so
-`  yes  \r\n` is accepted — but nothing else is. `YES`, `y`, and
+`yes  \r\n` is accepted — but nothing else is. `YES`, `y`, and
 `yes please` all abort, and the comparison is case-sensitive on purpose.
 Stating this precisely matters more here than elsewhere: a reader
 auditing the gate should not come away thinking it is tighter than it

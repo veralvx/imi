@@ -136,7 +136,7 @@ number, so a 32-bit userspace must send a different number than a
 data is compatible, but the command number is different". Both call
 `put_u64`, so only the request code varies.
 
-`ioctl_read!` derives the encoded size *and* the out-parameter type
+`ioctl_read!` derives the encoded size _and_ the out-parameter type
 from one argument, which cannot express that split — using it forces a
 hardcoded width. `ioctl_read_bad!` with an explicit
 `request_code_read!` computes the code from the target's own `size_t`

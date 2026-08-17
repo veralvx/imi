@@ -88,7 +88,7 @@ wipe_ends(armed.guard(), dev_size)?;
 ```
 
 `arm` takes `ArmedPhase`, not `GuardPhase`: `GuardPhase` is the public
-enum that includes `Disarmed`, and a guard cannot be armed *into* the
+enum that includes `Disarmed`, and a guard cannot be armed _into_ the
 disarmed state. The library emits `phase_started` rather than printing —
 the "Wiping partition signatures..." line is the binary's rendering of
 that event.

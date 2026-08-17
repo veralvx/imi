@@ -138,7 +138,7 @@ constants: `arm` consumes the guard and `disarm` clears the phase, so
 every `FlashGuard` a consumer can hold reports `Disarmed` and would not
 warn. What a caller actually wants to know — is this run inside the
 destructive window — is now answered by which type they are holding, and
-`ArmedGuard::current_phase` is the public accessor for *which* armed
+`ArmedGuard::current_phase` is the public accessor for _which_ armed
 phase.
 
 - `current_phase()` — the phase the guard would report if dropped now,
@@ -173,15 +173,15 @@ rather than merely unused.
 
 ## Where each transition fires (in the phase pipelines)
 
-| Transition              | Source location                                                                                                                                                                                |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `new(file, dev_path)`   | end of Phase 2, just acquired `O_EXCL`                                                                                                                                                         |
-| `arm(WipingSignatures)` | start of Phase 3                                                                                                                                                                               |
-| `set_phase(Writing)`    | start of Phase 4                                                                                                                                                                               |
-| `set_phase(Cooldown)`   | start of Phase 5a                                                                                                                                                                              |
-| `set_phase(Verifying)`  | start of Phase 5b                                                                                                                                                                              |
+| Transition              | Source location                                                                                                                                                                                                                                                                                                                               |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `new(file, dev_path)`   | end of Phase 2, just acquired `O_EXCL`                                                                                                                                                                                                                                                                                                        |
+| `arm(WipingSignatures)` | start of Phase 3                                                                                                                                                                                                                                                                                                                              |
+| `set_phase(Writing)`    | start of Phase 4                                                                                                                                                                                                                                                                                                                              |
+| `set_phase(Cooldown)`   | start of Phase 5a                                                                                                                                                                                                                                                                                                                             |
+| `set_phase(Verifying)`  | start of Phase 5b                                                                                                                                                                                                                                                                                                                             |
 | `disarm()`              | **start of Phase 6** (`phase_6.rs`), which consumes the `ArmedGuard` and yields a `FlashGuard`. It is the only caller, and there is no second one to drift from: the method exists on `ArmedGuard` alone. Which phase last ran before it depends on the skip flags: Phase 5b normally, Phase 5a with `--skip-verification`, Phase 4 with both |
-| `into_file()`           | end of Phase 6                                                                                                                                                                                 |
+| `into_file()`           | end of Phase 6                                                                                                                                                                                                                                                                                                                                |
 
 `set_phase` requires the guard to already be armed (debug-asserted).
 That makes "I forgot to call `arm()` first and the warning never fires"
@@ -226,7 +226,7 @@ Notes:
   The `from_u8_round_trips_known_phases` test pins both the round-trip
   and the fail-loud fallback.
 - **`writeln!` with the result discarded, never `eprintln!`.** This is
-  not a style preference. `eprintln!` *panics* if the write fails — a
+  not a style preference. `eprintln!` _panics_ if the write fails — a
   closed or full stderr, an `EPIPE` from a dead pager. This code runs
   from `Drop`, and the case it exists for is unwinding, where a second
   panic aborts the process immediately. That abort would skip this very
