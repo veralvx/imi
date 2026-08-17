@@ -25,9 +25,9 @@ use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::Result;
-use crate::common::context::Target;
 use crate::common::geometry::WIPE_REGION;
-use crate::common::guard::{ArmedPhase, FlashGuard};
+use crate::common::guard::{ArmedGuard, ArmedPhase};
+use crate::common::session::{ArmedSession, Session};
 use crate::error::Cancelled;
 use crate::error::{Context as _, bail};
 use crate::events::{Events, Phase as UiPhase, PhaseOutcome};
@@ -42,19 +42,23 @@ use crate::events::{Events, Phase as UiPhase, PhaseOutcome};
 /// is already armed when that happens, so the failure is reported with
 /// the FATAL notice.
 pub fn run<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
-    target: &Target,
+    session: Session,
     cancel: &AtomicBool,
     events: &mut E,
-) -> Result<()> {
+) -> Result<ArmedSession> {
     let outcome = {
         // Split deliberately. Everything before `arm` leaves the device
         // exactly as it was, so those failures report `Untouched`; from the
         // wipe onward they cannot, and report `Indeterminate`. Tagging the
         // whole phase `Indeterminate` would be safe but would make a caller
         // re-flash a device that was never touched.
-        preflight(guard, target, cancel).map_err(|e| e.at(crate::DeviceState::Untouched))?;
-        wipe(guard, target, events).map_err(|e| e.at(crate::DeviceState::Indeterminate))
+        // Preflight borrows; the wipe consumes. A failure between them
+        // leaves the guard disarmed and the device untouched, which is
+        // why preflight runs first and its errors carry `Untouched`.
+        match preflight(cancel) {
+            Err(e) => Err(e.at(crate::DeviceState::Untouched)),
+            Ok(()) => wipe(session, events).map_err(|e| e.at(crate::DeviceState::Indeterminate)),
+        }
     };
     events.phase_finished(
         UiPhase::Wipe,
@@ -69,8 +73,7 @@ pub fn run<E: Events + ?Sized>(
 /// the first destructive phase, and a flag already set when the caller
 /// invoked us must not cost the operator their partition table. Phase 4
 /// polling alone would wipe the signatures first and only then notice.
-fn preflight(guard: &FlashGuard, target: &Target, cancel: &AtomicBool) -> Result<()> {
-    guard.ensure_device_is(&target.dev_canon).context("Phase 3")?;
+fn preflight(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::SeqCst) {
         bail!(Cancelled { during: None });
     }
@@ -82,10 +85,14 @@ fn preflight(guard: &FlashGuard, target: &Target, cancel: &AtomicBool) -> Result
 /// Split from [`run`] so that every exit path passes through one
 /// place that maps the device state and emits `phase_finished`.
 /// The destructive part: from here the device is being modified.
-fn wipe<E: Events + ?Sized>(guard: &mut FlashGuard, target: &Target, events: &mut E) -> Result<()> {
-    guard.arm(ArmedPhase::WipingSignatures);
+fn wipe<E: Events + ?Sized>(session: Session, events: &mut E) -> Result<ArmedSession> {
+    // Read before arming: `arm` consumes the session, and the size is
+    // needed after the transition.
+    let dev_size = session.target().dev_size;
+    let armed = session.arm(ArmedPhase::WipingSignatures);
     events.phase_started(UiPhase::Wipe);
-    wipe_ends(guard, target.dev_size).context("Phase 3: wiping device signatures")
+    wipe_ends(armed.guard(), dev_size).context("Phase 3: wiping device signatures")?;
+    Ok(armed)
 }
 
 /// Tail-wipe offset for a device of `dev_size` bytes, or `None` when the
@@ -104,7 +111,7 @@ fn tail_wipe_offset(dev_size: u64) -> Option<u64> {
 /// The guard must already be armed — this is the first destructive
 /// operation in the pipeline, so if it aborts mid-write the `FlashGuard`'s
 /// warning is exactly what the operator needs to see.
-fn wipe_ends(guard: &FlashGuard, dev_size: u64) -> Result<()> {
+fn wipe_ends(guard: &ArmedGuard, dev_size: u64) -> Result<()> {
     // Phase 0 refuses undersized devices before the guard is armed (see
     // `run()`), so this bail is defense in depth: it fires only if a
     // future caller reaches the wipe without that preflight, and then a
@@ -149,7 +156,9 @@ fn wipe_ends(guard: &FlashGuard, dev_size: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlashGuard, WIPE_REGION, preflight, tail_wipe_offset, wipe_ends};
+    use super::{ArmedPhase, WIPE_REGION, preflight, tail_wipe_offset, wipe_ends};
+    use crate::common::guard::FlashGuard;
+    use crate::common::testing::TempPath;
 
     /// The overlap bound: below two regions there is no valid layout —
     /// head [0, R) and tail [dev-R, dev) would intersect. (Kills the
@@ -187,19 +196,17 @@ mod tests {
 
         let dev_size = 4 * WIPE_REGION;
         let len = usize::try_from(dev_size).unwrap();
-        let path =
-            std::env::temp_dir().join(format!("imi-wipe-{}-{}", std::process::id(), line!()));
-        let mut f = std::fs::File::create(&path).unwrap();
+        let path = TempPath::new("wipe");
+        let mut f = std::fs::File::create(&*path).unwrap();
         f.write_all(&vec![0xFF_u8; len]).unwrap();
         drop(f);
 
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
-        let guard = FlashGuard::new(file, path.clone());
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&*path).unwrap();
+        let guard = FlashGuard::new(file, path.to_path_buf()).arm(ArmedPhase::WipingSignatures);
         wipe_ends(&guard, dev_size).expect("wipe must succeed on a writable file");
-        guard.disarm();
-        drop(guard);
+        drop(guard.disarm());
 
-        let body = std::fs::read(&path).unwrap();
+        let body = std::fs::read(&*path).unwrap();
         assert_eq!(body.len(), len, "wipe must not resize the device");
 
         let region = usize::try_from(WIPE_REGION).unwrap();
@@ -209,25 +216,20 @@ mod tests {
             body[region..len - region].iter().all(|&b| b == 0xFF),
             "the middle must be left untouched"
         );
-
-        std::fs::remove_file(&path).unwrap();
     }
 
     /// A device below the head+tail floor must be refused, not partially
     /// wiped.
     #[test]
     fn wipe_ends_refuses_an_undersized_device() {
-        let path =
-            std::env::temp_dir().join(format!("imi-wipe-{}-{}", std::process::id(), line!()));
-        let file = std::fs::File::create(&path).unwrap();
-        let guard = FlashGuard::new(file, path.clone());
+        let path = TempPath::new("wipe");
+        let file = std::fs::File::create(&*path).unwrap();
+        let guard = FlashGuard::new(file, path.to_path_buf()).arm(ArmedPhase::WipingSignatures);
 
         let err = wipe_ends(&guard, WIPE_REGION).expect_err("undersized device must be refused");
         assert!(err.to_string().contains("too small"), "{err}");
 
-        guard.disarm();
-        drop(guard);
-        std::fs::remove_file(&path).unwrap();
+        drop(guard.disarm());
     }
 
     /// Phase 3's pre-flight is the cancellation gate for the whole
@@ -239,36 +241,22 @@ mod tests {
     /// cancelled during the confirmation prompt would still lose their
     /// partition table.
     #[test]
-    fn preflight_refuses_a_set_flag_and_a_crossed_pairing() {
+    fn preflight_refuses_a_set_cancel_flag() {
         use std::sync::atomic::AtomicBool;
 
-        use crate::common::context::Target;
-
-        let path = std::env::temp_dir().join(format!("imi-pre-{}-{}", std::process::id(), line!()));
-        std::fs::write(&path, [0_u8; 64]).unwrap();
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
-        let guard = FlashGuard::new(file, path.clone());
-        let target = Target::for_test(path.clone());
-
-        // Clear flag, matching device: proceed.
-        preflight(&guard, &target, &AtomicBool::new(false))
-            .expect("a clear flag and a matching device must pass");
+        // Clear flag: proceed.
+        preflight(&AtomicBool::new(false)).expect("a clear flag must pass");
 
         // Flag already set: refuse before anything is written.
-        let err = preflight(&guard, &target, &AtomicBool::new(true))
-            .expect_err("a set flag must stop Phase 3");
+        let err = preflight(&AtomicBool::new(true)).expect_err("a set flag must stop Phase 3");
         // Classification first: a string `bail!` would still say
         // "cancelled" while classifying as `Failed`.
         assert_eq!(err.kind(), crate::ErrorKind::Cancelled, "{err}");
         assert!(err.to_string().contains("cancelled"), "{err}");
 
-        // Guard and target naming different devices: refuse.
-        let other = Target::for_test(path.with_extension("other"));
-        preflight(&guard, &other, &AtomicBool::new(false))
-            .expect_err("a crossed guard/target pairing must be refused");
-
-        guard.disarm();
-        drop(guard);
-        let _rm = std::fs::remove_file(&path);
+        // The third case this test used to cover — a guard and a target
+        // naming different devices — is gone, and so is the code that
+        // refused it. Phase 3 takes one `Session`, which pairs the two at
+        // construction, so there is no second device to name.
     }
 }

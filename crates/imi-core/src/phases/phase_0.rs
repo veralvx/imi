@@ -601,6 +601,8 @@ fn query_dev_geometry_readonly(path: &Path) -> Result<(u64, bool)> {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use crate::common::testing::TempPath;
+
     use super::{
         Config, WIPE_REGION, confirm_destruction, ensure_block_device, ensure_device_large_enough,
         ensure_distinct_paths, ensure_image_fits, ensure_image_is_regular_file,
@@ -610,10 +612,9 @@ mod tests {
     /// Regular files pass — the overwhelmingly common case.
     #[test]
     fn image_check_accepts_regular_file() {
-        let p = std::env::temp_dir().join(format!("imi-img-check-{}", std::process::id()));
+        let p = TempPath::new("img-check");
         std::fs::write(&p, b"not really an iso").unwrap();
         ensure_image_is_regular_file(&p).unwrap();
-        std::fs::remove_file(&p).unwrap();
     }
 
     /// Directories are refused with a message naming the actual type
@@ -698,7 +699,7 @@ mod tests {
     #[test]
     fn block_device_guard_accepts_only_block_devices() {
         let dir = std::env::temp_dir();
-        let file = dir.join(format!("imi-notblk-{}", std::process::id()));
+        let file = TempPath::new("notblk");
         std::fs::write(&file, b"x").unwrap();
 
         let err = ensure_block_device(&file).unwrap_err();
@@ -714,8 +715,6 @@ mod tests {
         if loop0.exists() {
             ensure_block_device(loop0).expect("/dev/loop0 is a block device");
         }
-
-        std::fs::remove_file(&file).unwrap();
     }
 
     /// The confirmation gate, in both directions and both modes.

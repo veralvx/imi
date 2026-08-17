@@ -43,6 +43,7 @@ pub(crate) fn set_direct<F: AsFd>(fd: F, enable: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::common::testing::TempPath;
 
     use super::set_direct;
 
@@ -54,16 +55,15 @@ mod tests {
     /// and silently defeats the point of the aligned buffer rather than
     /// failing.
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(miri, ignore)]
     fn toggling_moves_only_the_o_direct_bit() {
-        let path =
-            std::env::temp_dir().join(format!("imi-odirect-{}-{}", std::process::id(), line!()));
+        let path = TempPath::new("odirect");
         let f = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .read(true)
             .write(true)
-            .open(&path)
+            .open(&*path)
             .expect("temp file");
 
         let get = || nix::fcntl::fcntl(&f, nix::fcntl::FcntlArg::F_GETFL).expect("F_GETFL");
@@ -83,7 +83,6 @@ mod tests {
         assert_eq!(get(), before, "clearing must restore the original flags exactly");
 
         drop(f);
-        let _rm = std::fs::remove_file(&path);
     }
 
     // No test for the `fcntl` failure path.

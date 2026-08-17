@@ -47,10 +47,10 @@ use crate::Result;
 use crate::common::aligned::{AlignedBuf, BUF_SIZE};
 use crate::common::cancel::cancellable_sleep;
 use crate::common::context::FlashOutcome;
-use crate::common::context::Target;
 use crate::common::direct_io::set_direct;
-use crate::common::guard::{ArmedPhase, FlashGuard};
+use crate::common::guard::{ArmedGuard, ArmedPhase};
 use crate::common::image::{Compression, ImageReader};
+use crate::common::session::ArmedSession;
 use crate::common::throttle::chunk_target_nanos;
 use crate::error::Cancelled;
 use crate::error::{Context as _, bail, err};
@@ -72,8 +72,7 @@ use crate::events::{Events, Phase as UiPhase, PhaseOutcome};
 /// on this thread after the channels are closed and the worker joined,
 /// so that the guard's FATAL notice still fires during the unwind.
 pub fn run<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
-    target: &Target,
+    session: &mut ArmedSession,
     throttle: Option<u64>,
     cancel: &AtomicBool,
     events: &mut E,
@@ -88,7 +87,7 @@ pub fn run<E: Events + ?Sized>(
     // `Untouched` would be an assertion it has no basis for; over-warning
     // costs a needless re-flash, under-warning costs a device someone
     // unplugs mid-write.
-    let outcome = run_inner(guard, target, throttle, cancel, events)
+    let outcome = run_inner(session, throttle, cancel, events)
         .map_err(|e| e.at(crate::DeviceState::Indeterminate));
     events.phase_finished(
         UiPhase::Flash,
@@ -102,51 +101,25 @@ pub fn run<E: Events + ?Sized>(
 /// Split from [`run`] so that every exit path passes through one
 /// place that maps the device state and emits `phase_finished`.
 fn run_inner<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
-    target: &Target,
+    session: &mut ArmedSession,
     throttle: Option<u64>,
     cancel: &AtomicBool,
     events: &mut E,
 ) -> Result<FlashOutcome> {
-    guard.ensure_device_is(&target.dev_canon).context("Phase 4")?;
-    ensure_wipe_ran(guard)?;
-
-    guard.set_phase(ArmedPhase::Writing);
+    session.set_phase(ArmedPhase::Writing);
     events.phase_started(UiPhase::Flash);
-    let reader =
-        ImageReader::open(&target.img_canon, target.comp).context("Phase 4: opening image")?;
-    flash(guard, reader, target.comp, target.raw_size, target.dev_size, throttle, cancel, events)
-        .context("Phase 4: flash write loop")
-}
 
-/// Refuse a guard Phase 3 never armed.
-///
-/// A disarmed guard here means the wipe was skipped, so the device still
-/// carries its old partition signatures — and if the image is smaller
-/// than the device, the stale tail survives underneath the new one, and
-/// the result boots into whatever was there before.
-///
-/// `set_phase` only `debug_assert`s the same thing, which is compiled
-/// out of the builds a consumer ships, so this check has to exist
-/// separately and at runtime.
-///
-/// Extracted from [`run_inner`] so it can be tested without a device.
-/// The integration suite covers it, but only behind `--ignored`, which
-/// `cargo mutants` does not run — leaving the negation replaceable:
-/// inverted, this refuses every correctly-armed flash and waves through
-/// exactly the case it exists to stop.
-///
-/// # Errors
-///
-/// Returns an error when the guard would not warn on drop.
-fn ensure_wipe_ran(guard: &FlashGuard) -> Result<()> {
-    if guard.would_warn_on_drop() {
-        return Ok(());
-    }
-    bail!(
-        "Phase 4 reached with a disarmed guard: Phase 3 has not run, so the device's \
-         signatures were never wiped. Drive the phases in order."
-    )
+    // Hoisted: `flash` takes `session.guard_mut()`, so reading
+    // `session.target()` in the same expression would borrow the session
+    // mutably and immutably at once (E0502).
+    let img_canon = session.target().img_canon.clone();
+    let comp = session.target().comp;
+    let raw_size = session.target().raw_size;
+    let dev_size = session.target().dev_size;
+
+    let reader = ImageReader::open(&img_canon, comp).context("Phase 4: opening image")?;
+    flash(session.guard_mut(), reader, comp, raw_size, dev_size, throttle, cancel, events)
+        .context("Phase 4: flash write loop")
 }
 
 /// Serial flash arm — routes raw images (per the dispatcher in
@@ -155,7 +128,7 @@ fn ensure_wipe_ran(guard: &FlashGuard) -> Result<()> {
 /// per-chunk work to [`process_chunk`] and post-loop work to
 /// [`flash_finalize`] (Step 1's extraction).
 fn flash_serial<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
+    guard: &mut ArmedGuard,
     mut reader: ImageReader,
     raw_size: Option<u64>,
     dev_size: u64,
@@ -281,7 +254,7 @@ enum ChunkOutcome {
 /// FD has `O_DIRECT` set on entry (it is cleared here on the tail path,
 /// exactly as the pre-extraction loop did).
 fn process_chunk(
-    guard: &FlashGuard,
+    guard: &ArmedGuard,
     buf: &AlignedBuf,
     filled: usize,
     offset: u64,
@@ -329,7 +302,7 @@ fn process_chunk(
 /// pure refactor. Durability is still established before this function
 /// returns, i.e. before Phase 5 reads anything back; reordering would
 /// be a behavior change and needs its own justification.
-fn flash_finalize(guard: &FlashGuard) -> Result<()> {
+fn flash_finalize(guard: &ArmedGuard) -> Result<()> {
     // Hardening — restore O_DIRECT to its pre-Phase-4 state (off) before
     // returning. The next phase (verify) currently calls `set_direct(fd,
     // false)` on entry anyway, so this is not strictly required today; but
@@ -380,7 +353,7 @@ type FilledItem = Result<(AlignedBuf, usize)>;
               bundling them into a struct would hide what each arm needs"
 )]
 pub(crate) fn flash<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
+    guard: &mut ArmedGuard,
     reader: ImageReader,
     comp: Compression,
     raw_size: Option<u64>,
@@ -459,7 +432,7 @@ fn worker_loop<R: Read>(
 /// Producer-consumer over two `mpsc` channels with a two-buffer pool:
 /// the worker decompresses into one `AlignedBuf` while this (main)
 /// thread writes the other. Only this thread ever touches the device
-/// FD; the worker never receives `&FlashGuard`. Loop discipline (from
+/// FD; the worker never receives `&ArmedGuard`. Loop discipline (from
 /// the threading plan, enforced by review): no `return` inside
 /// `'write_loop` — every exit `break`s to the single cleanup block,
 /// which drops BOTH main-side channel halves (either drop alone can
@@ -467,7 +440,7 @@ fn worker_loop<R: Read>(
 /// and only then re-raises a captured worker panic so
 /// `FlashGuard::drop`'s FATAL fires during a fully-cleaned-up unwind.
 fn flash_pipelined<R: Read + Send + 'static, E: Events + ?Sized>(
-    guard: &mut FlashGuard,
+    guard: &mut ArmedGuard,
     reader: R,
     dev_size: u64,
     throttle: Option<u64>,
@@ -668,7 +641,7 @@ fn chunk_end_within(offset: u64, len: usize, dev_size: u64) -> Option<u64> {
 
 /// Write a full aligned chunk via `pwrite`. Maps `ENOSPC` / short-write to a
 /// typed error.
-fn write_direct(guard: &FlashGuard, data: &[u8], offset: u64) -> Result<()> {
+fn write_direct(guard: &ArmedGuard, data: &[u8], offset: u64) -> Result<()> {
     match guard.file().write_all_at(data, offset) {
         Ok(()) => Ok(()),
         Err(e) if is_capacity_error(&e) => Err(err!(
@@ -683,7 +656,7 @@ fn write_direct(guard: &FlashGuard, data: &[u8], offset: u64) -> Result<()> {
 /// Write the final, sub-chunk residual via buffered `pwrite` (`O_DIRECT`
 /// already cleared by the caller). Maps `ENOSPC` / short-write to a
 /// typed error, like [`write_direct`].
-fn write_tail(guard: &FlashGuard, data: &[u8], offset: u64) -> Result<()> {
+fn write_tail(guard: &ArmedGuard, data: &[u8], offset: u64) -> Result<()> {
     match guard.file().write_all_at(data, offset) {
         Ok(()) => Ok(()),
         Err(e) if is_capacity_error(&e) => Err(err!(
@@ -707,47 +680,11 @@ fn is_capacity_error(e: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::TempPath;
+    use crate::common::guard::FlashGuard;
+    use crate::common::testing::{ArmedForTest, TempPath};
     use std::io::{Cursor, ErrorKind};
 
     // -- is_capacity_error ----------------------------------------------
-
-    /// Phase 4 must refuse a guard Phase 3 never armed, and only that.
-    ///
-    /// The negation is the safety property. Inverted, this refuses every
-    /// correctly-armed flash and admits exactly the case it exists to
-    /// stop: writing over a device whose old partition signatures were
-    /// never wiped, so a stale tail survives beneath a smaller image and
-    /// the device boots into what was there before.
-    ///
-    /// The integration suite already asserts this, but only behind
-    /// `--ignored`, so nothing reachable by mutation testing covered it.
-    #[test]
-    fn wipe_ran_check_refuses_only_a_disarmed_guard() {
-        let (guard, path) = tempfile_guard("armed-gate");
-
-        // Disarmed — Phase 3 never ran.
-        assert!(!guard.would_warn_on_drop(), "precondition: a fresh guard is disarmed");
-        let err = ensure_wipe_ran(&guard).expect_err("a disarmed guard must be refused");
-        let text = format!("{err:#}");
-        assert!(text.contains("Phase 3 has not run"), "{text}");
-        assert!(text.contains("never wiped"), "{text}");
-
-        // Armed by Phase 3's wipe.
-        guard.arm(ArmedPhase::WipingSignatures);
-        ensure_wipe_ran(&guard).expect("an armed guard must pass");
-
-        // Still armed once Phase 4 has taken over the label.
-        guard.set_phase(ArmedPhase::Writing);
-        ensure_wipe_ran(&guard).expect("the writing phase must pass too");
-
-        // Disarmed again — the refusal must come back, not latch.
-        guard.disarm();
-        assert!(ensure_wipe_ran(&guard).is_err(), "the check must not latch open");
-
-        drop(guard);
-        let _rm = std::fs::remove_file(&path);
-    }
 
     /// `ENOSPC` from the kernel (the canonical "device full" errno) must
     /// be classified as a capacity error. We construct the error via
@@ -950,7 +887,7 @@ mod tests {
     /// The returned [`TempPath`] deletes the file on drop, so a failing
     /// assertion cannot leave one behind — the trailing `remove_file`
     /// this replaces was skipped on every failure.
-    fn tempfile_guard(tag: &str) -> (FlashGuard, TempPath) {
+    fn tempfile_guard(tag: &str) -> (ArmedForTest, TempPath) {
         let p = TempPath::new(&format!("chunk-{tag}"));
         let f = std::fs::OpenOptions::new()
             .create(true)
@@ -959,7 +896,7 @@ mod tests {
             .write(true)
             .open(&*p)
             .unwrap();
-        (FlashGuard::new(f, p.to_path_buf()), p)
+        (ArmedForTest::new(FlashGuard::new(f, p.to_path_buf()).arm(ArmedPhase::Writing)), p)
     }
 
     #[test]
@@ -1034,7 +971,6 @@ mod tests {
         let after = nix::fcntl::fcntl(guard.file(), nix::fcntl::F_GETFL).unwrap();
         assert_eq!(after & libc::O_DIRECT, 0, "finalize must clear O_DIRECT");
 
-        guard.disarm();
         drop(guard);
         let _rm = std::fs::remove_file(&dev_p);
     }
@@ -1189,7 +1125,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // unsupported operation
     fn pipelined_throttle_enforces_rate_floor() {
-        let img_p = std::env::temp_dir().join(format!("imi-thr-{}.gz", std::process::id()));
+        let img_p = TempPath::new("thr");
         let gz = {
             use std::io::Write as _;
             let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -1278,7 +1214,9 @@ mod tests {
     #[cfg_attr(miri, ignore)] // unsupported operation
     fn process_chunk_surfaces_enospc_diagnostic() {
         let f = std::fs::OpenOptions::new().write(true).read(true).open("/dev/full").unwrap();
-        let guard = FlashGuard::new(f, std::path::PathBuf::from("/dev/full"));
+        let guard = ArmedForTest::new(
+            FlashGuard::new(f, std::path::PathBuf::from("/dev/full")).arm(ArmedPhase::Writing),
+        );
         let buf = AlignedBuf::new().unwrap();
         let huge = u64::MAX / 2; // capacity pre-check must pass
 
@@ -1304,11 +1242,11 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // real file I/O; Miri cannot execute it
     fn a_non_capacity_write_error_keeps_its_own_diagnostic() {
-        let path =
-            std::env::temp_dir().join(format!("imi-wperm-{}-{}", std::process::id(), line!()));
+        let path = TempPath::new("wperm");
         std::fs::write(&path, [0_u8; 64]).unwrap();
-        let ro = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
-        let guard = FlashGuard::new(ro, path.clone());
+        let ro = std::fs::OpenOptions::new().read(true).open(&*path).unwrap();
+        let guard =
+            ArmedForTest::new(FlashGuard::new(ro, path.to_path_buf()).arm(ArmedPhase::Writing));
 
         let err = write_direct(&guard, &[0_u8; 32], 0).unwrap_err();
         let text = format!("{err:#}");
@@ -1326,8 +1264,6 @@ mod tests {
         );
         assert!(tail_text.contains("writing tail"), "{tail_text}");
 
-        guard.disarm();
         drop(guard);
-        let _rm = std::fs::remove_file(&path);
     }
 }

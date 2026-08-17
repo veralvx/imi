@@ -44,6 +44,7 @@ use std::process::Command;
 use anyhow as _;
 use clap as _;
 use ctrlc as _;
+use dialoguer as _;
 use imi_core as _;
 use indicatif as _;
 
@@ -261,6 +262,46 @@ fn run_imi(image: &std::path::Path, device: &str) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// Omitting `--dev` without a terminal refuses, and teaches.
+///
+/// `Command` pipes every stdio stream, so the child sees no terminal —
+/// which is exactly a script that forgot `--dev`. The contract under
+/// test is `picker`'s second refusal: no selection may happen, the exit
+/// is a run failure (not a `clap` usage error — the flag is legal to
+/// omit), and the message must carry both the diagnosis and the fix.
+/// The candidate list itself is host-dependent, so the assertion is on
+/// the stable sentence around it, not its contents.
+///
+/// Needs no root: the refusal happens before the pipeline starts.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn omitting_dev_without_a_terminal_refuses_with_guidance() {
+    let img = TempImage::write("nodev", &[0xAB; 4096]);
+    let out = Command::new(env!("CARGO_BIN_EXE_imi"))
+        .args(["-i"])
+        .arg(&*img)
+        .arg("--yes")
+        .output()
+        .expect("spawn imi");
+    let text =
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+
+    assert!(!out.status.success(), "no terminal must mean no selection: {text}");
+    assert_eq!(out.status.code(), Some(1), "a legal-to-omit flag is not a usage error: {text}");
+    // Which refusal fires depends on the host: with candidates, the
+    // no-terminal branch lists them; with none (every disk carrying a
+    // system mount — CI hosts look like this), the empty-list branch
+    // fires first, correctly — there is nothing to render inline. Both
+    // must diagnose the omission and point at `--dev`.
+    assert!(text.contains("no --dev given"), "the omission must be named: {text}");
+    assert!(
+        text.contains("no terminal") || text.contains("no candidate device"),
+        "one of the two refusals must fire: {text}"
+    );
+    assert!(text.contains("--dev"), "and the fix must be pointed at: {text}");
+    assert!(!text.contains("FATAL"), "nothing armed, so nothing may warn: {text}");
+}
+
 /// The exit codes a script branches on.
 ///
 /// 0 for success, 1 for a run that failed, 2 for arguments `clap`
@@ -272,7 +313,7 @@ fn run_imi(image: &std::path::Path, device: &str) -> (bool, String) {
 /// None of these needs root — they all fail before the pipeline starts —
 /// so this runs in the ordinary suite rather than behind `--ignored`.
 #[test]
-#[cfg_attr(miri, ignore)] // unsupported operation
+#[cfg_attr(miri, ignore)] // miri unsupported operation
 fn exit_codes_distinguish_usage_errors_from_run_failures() {
     let code = |args: &[&str]| -> i32 {
         Command::new(env!("CARGO_BIN_EXE_imi"))
@@ -326,7 +367,7 @@ fn exit_codes_distinguish_usage_errors_from_run_failures() {
 /// covered: no guard, and a guard that was armed and correctly stood
 /// down.
 #[test]
-#[cfg_attr(miri, ignore)] // unsupported operation
+#[cfg_attr(miri, ignore)] // miri unsupported operation
 fn a_refusal_before_writing_prints_no_fatal_notice() {
     for args in [
         vec!["-i", "/nonexistent-image.img", "-d", "/dev/null", "--yes"],

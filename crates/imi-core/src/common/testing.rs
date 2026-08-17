@@ -7,7 +7,19 @@
 //! them identical to the byte. The crate's rule is that something more
 //! than one phase depends on belongs here, and a test fixture is not an
 //! exception — a fourth copy is how the third one's drift goes unnoticed.
+//!
+//! Three helpers live here, and each exists because a test was leaving
+//! something behind:
+//!
+//! - [`Recorder`] — the `Events` sink the phase tests assert against.
+//! - [`TempPath`] — a temp file that unlinks itself. Trailing
+//!   `remove_file` calls were skipped on every failing assertion; 2767
+//!   files had accumulated in `/tmp` before this existed.
+//! - [`ArmedForTest`] — an armed guard that disarms itself, so fixtures
+//!   do not print the FATAL notice when they drop. A passing unit run
+//!   was emitting seventeen of them.
 
+use crate::common::guard::ArmedGuard;
 use crate::events::{Events, Phase, PhaseOutcome};
 
 /// An [`Events`] sink that remembers what it was told.
@@ -102,6 +114,58 @@ impl AsRef<std::path::Path> for TempPath {
 impl Drop for TempPath {
     fn drop(&mut self) {
         let _rm = std::fs::remove_file(&self.path);
+    }
+}
+
+/// An [`ArmedGuard`] that disarms itself when the test ends.
+///
+/// Unit tests that exercise the write and compare helpers need an armed
+/// guard, because those helpers take one. But an armed guard prints the
+/// FATAL notice when it drops, and a passing unit run was emitting
+/// seventeen of them — noise that trains a reader to skim exactly the
+/// line that matters on a real interrupted flash.
+///
+/// Disarming on drop keeps unit output clean — on a passing test and on
+/// a panicking one alike, since `Drop` runs during unwind too. I wrote
+/// the opposite here first and a panic-injection check disproved it.
+///
+/// That silence is deliberate rather than a shortcut. The notice's own
+/// behaviour is tested directly by
+/// `fatal_notice_fires_only_when_armed_and_names_the_device_and_phase`,
+/// and end to end by `an_interrupted_flash_warns_that_the_device_is_unsafe`
+/// in the binary's suite. Nothing depends on these fixtures printing it,
+/// so their printing it is pure noise — seventeen lines of it in a
+/// passing run, before this existed.
+pub(crate) struct ArmedForTest {
+    inner: Option<ArmedGuard>,
+}
+
+impl ArmedForTest {
+    /// Wrap an armed guard so it falls silent at the end of the test.
+    pub(crate) fn new(guard: ArmedGuard) -> Self {
+        Self { inner: Some(guard) }
+    }
+}
+
+impl std::ops::Deref for ArmedForTest {
+    type Target = ArmedGuard;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref().expect("ArmedForTest used after drop")
+    }
+}
+
+impl std::ops::DerefMut for ArmedForTest {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.as_mut().expect("ArmedForTest used after drop")
+    }
+}
+
+impl Drop for ArmedForTest {
+    fn drop(&mut self) {
+        if let Some(guard) = self.inner.take() {
+            drop(guard.disarm());
+        }
     }
 }
 

@@ -139,6 +139,73 @@ fn partitions_of_in(root: &str, disk_kname: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Every whole-disk kernel name the host exposes.
+///
+/// Read from `/sys/block`, which lists disks only — partitions live one
+/// level down and never appear here — so no `is_partition` filtering is
+/// needed on the result. Virtual devices (`loop0`, `zram0`, ...) do
+/// appear and are the caller's problem: this function reports what the
+/// kernel exposes, and the policy of which disks are *plausible flash
+/// targets* belongs to `devices::candidate_devices`, in one place.
+///
+/// Names that are not UTF-8 are skipped rather than failing the whole
+/// enumeration: such a name cannot be a candidate the picker could
+/// display or the user could type, and one hostile udev rule should not
+/// blind the listing to every other disk.
+pub(crate) fn all_disk_knames() -> Result<Vec<String>> {
+    all_disk_knames_in("/sys/block")
+}
+
+/// Injectable body of [`all_disk_knames`].
+fn all_disk_knames_in(root: &str) -> Result<Vec<String>> {
+    let rd = fs::read_dir(root).with_context(|| format!("read {root}"))?;
+    let mut out = Vec::new();
+    for entry in rd {
+        let entry = entry.with_context(|| format!("read an entry of {root}"))?;
+        if let Ok(name) = entry.file_name().into_string() {
+            out.push(name);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The disk's capacity in bytes, from `/sys/class/block/<kname>/size`.
+///
+/// The sysfs attribute counts 512-byte sectors regardless of the disk's
+/// logical block size — that constant is part of the sysfs ABI, not a
+/// property of the device — so the byte figure is `sectors * 512`.
+///
+/// `None` for a missing or unparseable attribute *and* for a present
+/// zero: a card reader with no card inserted reports 0, and "no medium"
+/// and "no attribute" call for the same treatment from a picker.
+pub(crate) fn size_bytes(kname: &str) -> Option<u64> {
+    size_bytes_in(SYS_CLASS_BLOCK, kname)
+}
+
+/// Injectable body of [`size_bytes`].
+fn size_bytes_in(root: &str, kname: &str) -> Option<u64> {
+    let raw = fs::read_to_string(format!("{root}/{kname}/size")).ok()?;
+    let sectors: u64 = raw.trim().parse().ok()?;
+    sectors.checked_mul(512).filter(|&b| b > 0)
+}
+
+/// Whether the device reports itself removable.
+///
+/// `false` for a missing attribute: `NVMe`-in-USB enclosures and some virtio
+/// disks report 0 despite being exactly what a user wants to flash, so
+/// this is display metadata for sorting a picker — never an exclusion
+/// gate. Treating "unknown" and "fixed" the same is therefore harmless
+/// here, where it would be a policy bug in a filter.
+pub(crate) fn removable(kname: &str) -> bool {
+    removable_in(SYS_CLASS_BLOCK, kname)
+}
+
+/// Injectable body of [`removable`].
+fn removable_in(root: &str, kname: &str) -> bool {
+    fs::read_to_string(format!("{root}/{kname}/removable")).is_ok_and(|s| s.trim() == "1")
+}
+
 /// Read `/sys/class/block/<kname>/dm/uuid` if present. DM devices embed a
 /// prefix identifying the target type: `LVM-`, `CRYPT-`, `mpath-`, `DMRAID-`,
 /// `part-`, etc. Returns `None` for non-DM devices.
@@ -206,7 +273,11 @@ fn walk_holders(root: &str, kname: &str, acc: &mut HashSet<String>) -> Result<()
 }
 
 /// Read `/sys/class/block/<kname>/device/model` if present, trimmed.
-/// Used only for the confirmation prompt.
+///
+/// Shown to the operator in the confirmation prompt and in the device
+/// picker's list — the two places a human decides by it — which is why
+/// [`sanitise_model`] runs here rather than at either display site:
+/// every future reader of this value gets the defanged form.
 pub(crate) fn device_model(kname: &str) -> Option<String> {
     device_model_in(SYS_CLASS_BLOCK, kname)
 }
@@ -486,6 +557,106 @@ mod tests {
     /// which needs no privilege — so this runs in the ordinary suite
     /// rather than behind `--ignored`, where `cargo mutants` would not
     /// see it.
+    /// The `pub(crate)` wrappers must read the real root, checked against
+    /// the filesystem rather than against themselves.
+    ///
+    /// Each wrapper is one line: `f(k)` calls `f_in(SYS_CLASS_BLOCK, k)`.
+    /// The only thing that can be wrong is the root it passes, so the
+    /// obvious test is that the wrapper agrees with its `_in` variant —
+    /// and that test is worthless. A pure delegation agrees with itself
+    /// whatever root it used; both sides move together.
+    ///
+    /// The independent oracle is `/sys/class/block` itself: probe it
+    /// directly and compare. That kills three mutants the existing
+    /// real-sysfs test missed, because that one asserts
+    /// `partitions_of(..).is_ok()` without looking at the contents and
+    /// `dm_uuid(..).is_none()` in the negative direction only.
+    ///
+    /// What it does *not* do here is catch a wrapper reading the wrong
+    /// tree. Tried: pointing `is_partition` at `/sys/dev/block`, which is
+    /// keyed by `MAJ:MIN` rather than by name, and this test still
+    /// passed. On a host with no partitions the wrong root and the right
+    /// one both answer "not a partition" for every device, so nothing
+    /// discriminates. The oracle is still the right shape — comparing a
+    /// delegation against itself would be worthless — but its reach
+    /// depends on the tree having something to disagree about.
+    #[test]
+    fn public_wrappers_match_a_direct_probe_of_the_real_sysfs() {
+        let names = all_block_knames().expect("/sys/class/block must be readable");
+        assert!(!names.is_empty(), "no block devices; this test cannot run");
+
+        // Devices actually probed, as distinct from devices enumerated.
+        // The `continue` below skips one that vanished, and a skip that
+        // fired for every device would leave this test green having
+        // asserted nothing — checked by forcing exactly that, which it
+        // passed until this counter existed.
+        let mut probed = 0_usize;
+
+        for k in &names {
+            let base = PathBuf::from(SYS_CLASS_BLOCK).join(k);
+
+            // Read the directory first, and treat "gone" as "skip".
+            //
+            // `all_block_knames` enumerated a moment ago; cargo runs test
+            // binaries concurrently, and the integration suites attach and
+            // detach loop devices. A device that vanished between the
+            // enumeration and this probe is a benign race, not a defect,
+            // and every other error still fails the test. Reasoned rather
+            // than observed — this host has one CPU, so the binaries
+            // serialise and the window never opens locally.
+            let entries = match fs::read_dir(&base) {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("read_dir {}: {e}", base.display()),
+            };
+
+            assert_eq!(
+                is_partition(k),
+                base.join("partition").exists(),
+                "{k}: is_partition must match the presence of the partition marker"
+            );
+
+            // The oracle must be independent in implementation and
+            // identical in contract. `partitions_of_in` propagates a bad
+            // entry rather than skipping it — its own comment says why: a
+            // partition it cannot name is one Phase 1 will never unmount
+            // — and rejects a non-UTF-8 name outright. An oracle that
+            // `flatten()`s errors away and `to_string_lossy()`s names
+            // would agree with a function that had lost both behaviours.
+            let mut expected: Vec<String> = entries
+                .map(|e| e.expect("a readable dir entry"))
+                .filter(|e| e.path().join("partition").exists())
+                .map(|e| e.file_name().to_str().expect("a UTF-8 partition name").to_owned())
+                .collect();
+            expected.sort();
+            let mut got = partitions_of(k).expect("partitions_of must read the real root");
+            got.sort();
+            assert_eq!(got, expected, "{k}: partitions_of must match a direct readdir");
+
+            // `dm_uuid_in` trims but does not discard an empty result, so
+            // an empty `dm/uuid` file yields `Some("")`. An oracle that
+            // filtered empties would report `None` and disagree.
+            //
+            // Not demonstrable on a host with no device-mapper device:
+            // adding the filter to `dm_uuid_in` here leaves the whole
+            // suite green, because both sides stay `None` whatever the
+            // rule is. The alignment is a contract argument, not a
+            // measured one, and this note exists so the next reader does
+            // not "simplify" one side back out of step with the other.
+            let expected_uuid =
+                fs::read_to_string(base.join("dm").join("uuid")).ok().map(|u| u.trim().to_owned());
+            assert_eq!(dm_uuid(k), expected_uuid, "{k}: dm_uuid must match the real file");
+
+            probed += 1;
+        }
+
+        assert!(
+            probed > 0,
+            "every one of the {} enumerated devices was skipped; this test asserted nothing",
+            names.len()
+        );
+    }
+
     #[test]
     fn public_wrappers_resolve_against_the_real_sysfs() {
         // The emptiness check stays an assertion rather than an early
@@ -729,6 +900,67 @@ mod tests {
     /// Partition detection gates Phase 0's refusal of `/dev/sda1`. Both
     /// directions matter: a disk must not look like a partition, and a
     /// partition must not look like a disk.
+    /// Build a minimal, isolated tree for one test.
+    ///
+    /// The canonical `fake_sysfs` fixture models `/sys/class/block`,
+    /// where partitions appear as top-level entries; `all_disk_knames`
+    /// reads `/sys/block`, where they do not. Testing it against the
+    /// canonical root would assert the wrong universe, so these tests
+    /// build their own — through the same `TempTree` so cleanup and
+    /// uniqueness come from one place.
+    fn mini_tree(tag: &str, files: &[(&str, &str)]) -> TempTree {
+        let root = std::env::temp_dir().join(format!(
+            "imi-sysfs-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        for (rel, content) in files {
+            let full = root.join(rel);
+            fs::create_dir_all(full.parent().expect("relative path has a parent")).unwrap();
+            fs::write(full, content).unwrap();
+        }
+        TempTree { root }
+    }
+
+    /// `/sys/block` enumeration returns every entry, sorted.
+    #[test]
+    fn all_disk_knames_lists_and_sorts_the_root() {
+        let t =
+            mini_tree("knames", &[("sdb/size", "1\n"), ("sda/size", "1\n"), ("vda/size", "1\n")]);
+        let got = all_disk_knames_in(t.path()).unwrap();
+        assert_eq!(got, ["sda", "sdb", "vda"], "sorted, complete");
+    }
+
+    /// Size is sectors-times-512, and both "absent" and "zero" are `None`.
+    ///
+    /// The zero case is a card reader with no card: a picker must treat
+    /// "no medium" exactly like "no such attribute", so the reader folds
+    /// them before policy ever sees a number.
+    #[test]
+    fn size_bytes_scales_sectors_and_folds_zero_to_none() {
+        let t = mini_tree(
+            "size",
+            &[("sda/size", "7814037168\n"), ("empty/size", "0\n"), ("junk/size", "many\n")],
+        );
+        assert_eq!(size_bytes_in(t.path(), "sda"), Some(7_814_037_168 * 512));
+        assert_eq!(size_bytes_in(t.path(), "empty"), None, "no medium reads as absent");
+        assert_eq!(size_bytes_in(t.path(), "junk"), None, "unparseable reads as absent");
+        assert_eq!(size_bytes_in(t.path(), "missing"), None);
+    }
+
+    /// Removable is display metadata: strict about "1", quiet about the rest.
+    #[test]
+    fn removable_is_true_only_for_a_literal_one() {
+        let t = mini_tree(
+            "removable",
+            &[("usb/removable", "1\n"), ("nvme/removable", "0\n"), ("odd/removable", "yes\n")],
+        );
+        assert!(removable_in(t.path(), "usb"));
+        assert!(!removable_in(t.path(), "nvme"));
+        assert!(!removable_in(t.path(), "odd"), "anything but 1 is not removable");
+        assert!(!removable_in(t.path(), "missing"), "absent attribute is not removable");
+    }
+
     #[test]
     fn is_partition_distinguishes_disks_from_partitions() {
         let root = fake_sysfs("ispart");

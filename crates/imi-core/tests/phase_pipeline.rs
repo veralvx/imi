@@ -15,6 +15,40 @@
 //!
 //! `--test-threads=1` matters: the tests attach loop devices and must
 //! not race each other for `losetup -f`.
+//!
+//! # Two tests that can no longer be written
+//!
+//! `phase_4_refuses_a_guard_phase_3_never_armed` and its Phase 5 twin
+//! each built a disarmed guard, handed it to a later phase, and asserted
+//! the runtime refusal. Neither can be written since the typestate
+//! split: Phases 4 and 5 take `&mut ArmedGuard`, which only Phase 3
+//! produces, so the call does not compile. Verified against an external
+//! consumer crate — skipping Phase 3 gives `E0308: expected
+//! &mut ArmedGuard, found &mut FlashGuard`.
+//!
+//! A test that cannot be expressed is the strongest possible outcome for
+//! the property it was testing, but it leaves a gap in the record, which
+//! this note fills.
+//!
+//! It fills it here, at module level, rather than as a free-standing
+//! `///` block where it first lived. That form is a doc comment attached
+//! to nothing, and a sweep for orphaned doc comments deleted it — which
+//! is how the gap it was written to prevent opened anyway.
+//!
+//! The same has now happened for *pairing*. `crossed_guard_and_target_
+//! are_refused` here, and its unit-level counterparts in `guard.rs`,
+//! `phase_3.rs`, `phase_4.rs` and `phase_5.rs`, each built a guard on one
+//! device and a target describing another, then asserted the runtime
+//! refusal. None can be written now: Phases 3 to 6 take a `Session` or an
+//! `ArmedSession`, which pairs the two at construction, so there is no
+//! second parameter a mismatched target could occupy. Verified against an
+//! external consumer crate — the crossed call fails with `E0061`, wrong
+//! number of arguments, rather than compiling and being refused.
+//!
+//! `FlashGuard::ensure_device_is` and its `ArmedGuard` delegate went with
+//! them. They had no callers left, and `FlashGuard::new` is `pub(crate)`,
+//! so no consumer-reachable path can produce an unpaired guard for them
+//! to check.
 
 // Scaffolding sits outside `#[test]` bodies, so clippy's
 // `allow-*-in-tests` knobs do not reach it; an integration-test crate
@@ -212,14 +246,15 @@ fn per_phase_drive_flashes_byte_exact() {
     // The same sequence `imi_core::run` performs, spelled out.
     let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
     let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-    let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
-    imi_core::phases::phase_3::run(&mut guard, &target, &cancel, &mut ()).expect("phase 3");
-    let outcome = imi_core::phases::phase_4::run(&mut guard, &target, None, &cancel, &mut ())
-        .expect("phase 4");
-    imi_core::phases::phase_5::run(&mut guard, &target, &config, outcome, &cancel, &mut ())
+    let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
+    let mut guard = imi_core::phases::phase_3::run(guard, &cancel, &mut ()).expect("phase 3");
+    let outcome =
+        imi_core::phases::phase_4::run(&mut guard, None, &cancel, &mut ()).expect("phase 4");
+    imi_core::phases::phase_5::run(&mut guard, &config, outcome, &cancel, &mut ())
         .expect("phase 5");
-    imi_core::phases::phase_6::run(guard, &mut ());
-    imi_core::phases::phase_7::run(&target, &cancel, &mut ()).expect("phase 7");
+    // Phase 6 hands the target back, which Phase 7 needs.
+    let flashed = imi_core::phases::phase_6::run(guard, &mut ());
+    imi_core::phases::phase_7::run(&flashed, &cancel, &mut ()).expect("phase 7");
 
     let expected = std::fs::read(&image).expect("read source image");
     assert_eq!(
@@ -255,14 +290,14 @@ fn per_phase_drive_matches_whole_pipeline_run() {
         let config = config_for(&image, &dev.node);
         let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
         let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-        let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
-        imi_core::phases::phase_3::run(&mut guard, &target, &cancel, &mut ()).expect("phase 3");
-        let outcome = imi_core::phases::phase_4::run(&mut guard, &target, None, &cancel, &mut ())
-            .expect("phase 4");
-        imi_core::phases::phase_5::run(&mut guard, &target, &config, outcome, &cancel, &mut ())
+        let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
+        let mut guard = imi_core::phases::phase_3::run(guard, &cancel, &mut ()).expect("phase 3");
+        let outcome =
+            imi_core::phases::phase_4::run(&mut guard, None, &cancel, &mut ()).expect("phase 4");
+        imi_core::phases::phase_5::run(&mut guard, &config, outcome, &cancel, &mut ())
             .expect("phase 5");
-        imi_core::phases::phase_6::run(guard, &mut ());
-        imi_core::phases::phase_7::run(&target, &cancel, &mut ()).expect("phase 7");
+        let flashed = imi_core::phases::phase_6::run(guard, &mut ());
+        imi_core::phases::phase_7::run(&flashed, &cancel, &mut ()).expect("phase 7");
         dev.read_backing()
     };
 
@@ -302,7 +337,7 @@ fn phases_0_to_2_leave_the_device_untouched() {
 
     let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
     let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-    let guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
+    let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
 
     // Releasing an unarmed guard must be silent and non-destructive.
     drop(guard);
@@ -335,48 +370,11 @@ fn a_pre_set_cancel_flag_aborts_the_write() {
 
     let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
     let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-    let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
-    imi_core::phases::phase_3::run(&mut guard, &target, &clear, &mut ()).expect("phase 3");
+    let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
+    let mut guard = imi_core::phases::phase_3::run(guard, &clear, &mut ()).expect("phase 3");
 
-    let result = imi_core::phases::phase_4::run(&mut guard, &target, None, &cancel, &mut ());
+    let result = imi_core::phases::phase_4::run(&mut guard, None, &cancel, &mut ());
     assert!(result.is_err(), "a pre-set cancel flag must abort phase 4");
-
-    let _rm = std::fs::remove_file(&image);
-}
-
-/// Crossing a guard for one device with a `Target` describing another
-/// must be refused before anything destructive happens.
-///
-/// `Target` is `#[non_exhaustive]` so a consumer cannot *forge* one, but
-/// two legitimately-obtained targets can still be swapped by a caller
-/// driving several devices — a GUI flashing two sticks, say. Writing
-/// image B onto device A would be silent and catastrophic, so the phases
-/// verify the pairing.
-#[test]
-#[ignore = "requires root and two free loop devices"]
-fn crossed_guard_and_target_are_refused() {
-    let dev_a = Loop::attach("cross-a", 0x5A);
-    let dev_b = Loop::attach("cross-b", 0xB5);
-    let image = raw_image("cross", 64 * 1024);
-
-    let config_a = config_for(&image, &dev_a.node);
-    let config_b = config_for(&image, &dev_b.node);
-
-    let target_a = imi_core::phases::phase_0::run(&config_a, &mut ()).expect("phase 0 on A");
-    let target_b = imi_core::phases::phase_0::run(&config_b, &mut ()).expect("phase 0 on B");
-    let devts_a = imi_core::phases::phase_1::run(&target_a, &mut ()).expect("phase 1 on A");
-    let mut guard_a =
-        imi_core::phases::phase_2::run(&target_a, &devts_a, &mut ()).expect("phase 2 on A");
-
-    let before = dev_a.read_backing();
-
-    // Guard holds A; target describes B.
-    let err =
-        imi_core::phases::phase_3::run(&mut guard_a, &target_b, &AtomicBool::new(false), &mut ())
-            .expect_err("a crossed guard/target pairing must be refused");
-    assert!(format!("{err:#}").contains("mismatched device"), "{err:#}");
-
-    assert_eq!(before, dev_a.read_backing(), "the refusal must not touch device A");
 
     let _rm = std::fs::remove_file(&image);
 }
@@ -400,13 +398,12 @@ fn a_zero_throttle_is_refused_rather_than_stalling() {
 
     let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
     let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-    let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
-    imi_core::phases::phase_3::run(&mut guard, &target, &cancel, &mut ()).expect("phase 3");
+    let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
+    let mut guard = imi_core::phases::phase_3::run(guard, &cancel, &mut ()).expect("phase 3");
 
     let started = std::time::Instant::now();
-    let err =
-        imi_core::phases::phase_4::run(&mut guard, &target, config.throttle, &cancel, &mut ())
-            .expect_err("a zero throttle must be refused");
+    let err = imi_core::phases::phase_4::run(&mut guard, config.throttle, &cancel, &mut ())
+        .expect_err("a zero throttle must be refused");
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "must fail fast, not stall");
     assert!(format!("{err:#}").contains("at least 1 byte per second"), "{err:#}");
 
@@ -484,11 +481,11 @@ fn a_cancelled_write_is_classified_as_indeterminate() {
     // And a phase past the guard's arm reports the opposite.
     let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
     let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-    let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
+    let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
     let clear = AtomicBool::new(false);
-    imi_core::phases::phase_3::run(&mut guard, &target, &clear, &mut ()).expect("phase 3");
+    let mut guard = imi_core::phases::phase_3::run(guard, &clear, &mut ()).expect("phase 3");
     let mid = AtomicBool::new(true);
-    let mid_err = imi_core::phases::phase_4::run(&mut guard, &target, None, &mid, &mut ())
+    let mid_err = imi_core::phases::phase_4::run(&mut guard, None, &mid, &mut ())
         .expect_err("a pre-set flag must abort the write");
     assert_eq!(mid_err.kind(), ErrorKind::Cancelled, "{mid_err:#}");
     assert_eq!(
@@ -555,54 +552,6 @@ fn the_confirmation_gate_holds_in_both_directions() {
     let _rm = std::fs::remove_file(&image);
 }
 
-/// Phase 4 must refuse a guard Phase 3 never armed.
-///
-/// The type system enforces most of the ordering — a `FlashGuard` only
-/// comes from Phase 2, a `FlashOutcome` only from Phase 4 — but nothing
-/// stops a caller going straight from Phase 2 to Phase 4. That skips the
-/// signature wipe, leaving the old partition table under the new image;
-/// if the image is smaller than the device, the stale tail survives.
-///
-/// `set_phase` only `debug_assert`s this, and a consumer ships release
-/// builds.
-#[test]
-#[ignore = "requires root and a free loop device"]
-fn phase_4_refuses_a_guard_phase_3_never_armed() {
-    let image = raw_image("ordering", 256 * 1024);
-    let dev = Loop::attach("ordering", 0x7E);
-    let config = config_for(&image, &dev.node);
-
-    let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
-    let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-    let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
-
-    // Straight to Phase 4, skipping the wipe.
-    let err =
-        imi_core::phases::phase_4::run(&mut guard, &target, None, &AtomicBool::new(false), &mut ())
-            .expect_err("Phase 4 must refuse a disarmed guard");
-    let text = format!("{err:#}");
-    assert!(text.contains("disarmed guard"), "{text}");
-    assert!(text.contains("Phase 3"), "{text}");
-
-    // Indeterminate, even though the assertion below proves the device
-    // was never touched. That is the deliberate answer for a
-    // precondition violation: the caller drove the phases out of order,
-    // so the crate cannot vouch for what else was done to the device and
-    // will not claim it is clean. Pinned here so a future change to
-    // Untouched has to argue for itself rather than look like a fix.
-    assert_eq!(err.device_state(), imi_core::DeviceState::Indeterminate, "{text}");
-
-    // Nothing was written.
-    assert_eq!(
-        dev.read_backing().iter().filter(|b| **b != 0x7E).count(),
-        0,
-        "a refused Phase 4 must not have touched the device"
-    );
-
-    imi_core::phases::phase_6::run(guard, &mut ());
-    let _rm = std::fs::remove_file(&image);
-}
-
 /// Verification must actually detect a device that does not match.
 ///
 /// `full_pipeline_flashes_byte_exact` would pass unchanged if Phase 5
@@ -628,10 +577,10 @@ fn verification_detects_a_device_that_does_not_match_the_image() {
 
     let target = imi_core::phases::phase_0::run(&config, &mut ()).expect("phase 0");
     let devts = imi_core::phases::phase_1::run(&target, &mut ()).expect("phase 1");
-    let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
-    imi_core::phases::phase_3::run(&mut guard, &target, &cancel, &mut ()).expect("phase 3");
-    let outcome = imi_core::phases::phase_4::run(&mut guard, &target, None, &cancel, &mut ())
-        .expect("phase 4");
+    let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
+    let mut guard = imi_core::phases::phase_3::run(guard, &cancel, &mut ()).expect("phase 3");
+    let outcome =
+        imi_core::phases::phase_4::run(&mut guard, None, &cancel, &mut ()).expect("phase 4");
 
     // Alter the image so it no longer matches what was written. Offset
     // chosen past the first chunk so the pipelined and serial arms both
@@ -644,9 +593,8 @@ fn verification_detects_a_device_that_does_not_match_the_image() {
         f.sync_all().expect("sync");
     }
 
-    let err =
-        imi_core::phases::phase_5::run(&mut guard, &target, &config, outcome, &cancel, &mut ())
-            .expect_err("a device that differs from the image must fail verification");
+    let err = imi_core::phases::phase_5::run(&mut guard, &config, outcome, &cancel, &mut ())
+        .expect_err("a device that differs from the image must fail verification");
 
     let text = format!("{err:#}");
     assert_eq!(err.kind(), ErrorKind::VerificationFailed, "{text}");
@@ -702,7 +650,7 @@ fn the_phase_2_claim_excludes_other_openers() {
     );
     drop(before);
 
-    let guard = imi_core::phases::phase_2::run(&target, &devts, &mut ()).expect("phase 2");
+    let guard = imi_core::phases::phase_2::run(target, &devts, &mut ()).expect("phase 2");
 
     // While the guard holds it, a second exclusive open must be refused.
     let during = std::fs::OpenOptions::new()
@@ -728,7 +676,9 @@ fn the_phase_2_claim_excludes_other_openers() {
     // So retry rather than asserting instantaneous availability. This
     // failed intermittently on a developer's machine and never in the
     // container it was written in, which has no udevd at all.
-    imi_core::phases::phase_6::run(guard, &mut ());
+    // Phase 6 takes an ArmedGuard, and this test never armed one — it
+    // only ever needed the claim released, which dropping does.
+    drop(guard);
 
     let release_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut last: Option<std::io::Error> = None;
@@ -896,7 +846,7 @@ fn a_device_that_changes_size_after_probing_is_refused() {
     }
 
     // Phase 2 claims the node, then re-verifies what it claimed.
-    let err = imi_core::phases::phase_2::run(&target, &devts, &mut ())
+    let err = imi_core::phases::phase_2::run(target, &devts, &mut ())
         .expect_err("a device whose size changed after probing must be refused");
     let text = format!("{err:#}");
     // Specifically the size arm: a looser match would also accept the

@@ -2,7 +2,10 @@
 //!
 //! The handler only flips a shared flag; it never exits. Every phase's
 //! loops poll that flag and return `Err`, so the process leaves through
-//! a normal unwind and `FlashGuard::drop` still prints its FATAL notice.
+//! a normal unwind and the guard's `Drop` still prints its FATAL notice.
+//! During the destructive window the pipeline holds an `ArmedSession`;
+//! dropping one drops the `ArmedGuard` inside it, then the `FlashGuard`
+//! inside that, whose `Drop` is where the notice lives.
 //! Both signals are handled — `ctrlc` needs its `termination` feature
 //! for SIGTERM, which the workspace manifest enables.
 //!
@@ -15,7 +18,7 @@
 //! leaves the flag set and the process apparently unresponsive.
 //!
 //! Escalating would end the process without unwinding, which is exactly
-//! the outcome `FlashGuard` exists to prevent: no FATAL notice, and an
+//! the outcome the guard exists to prevent: no FATAL notice, and an
 //! operator with no way to know the device is half-written. Waiting is
 //! the correct behaviour, and an operator who reaches for the USB stick
 //! instead is the failure this trade avoids.

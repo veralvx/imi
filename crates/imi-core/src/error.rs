@@ -91,6 +91,33 @@ pub enum ErrorKind {
 /// a half-written image? Reading it from the error message is not an
 /// option — messages get reworded, and this decides whether someone
 /// walks away with an unbootable disk.
+/// # Which phase reports which
+///
+/// Only Phase 3 splits its reporting, and the reason is that it is the
+/// only phase that crosses the boundary. The device is untouched when it
+/// starts and has had its partition signatures destroyed when it
+/// finishes, so its preflight failures carry `Untouched` and everything
+/// from the wipe onward carries `Indeterminate`.
+///
+/// | phase | device at entry | reports |
+/// | --- | --- | --- |
+/// | 0, 1, 2 | untouched | `Untouched` |
+/// | 3 | untouched, then wiped mid-phase | `Untouched` before the wipe, `Indeterminate` after |
+/// | 4 | signatures already gone | `Indeterminate` |
+/// | 5 | image written, not yet verified | `Indeterminate` |
+/// | 6 | written and verified | infallible |
+/// | 7 | written and verified | `Written` |
+///
+/// Phase 4 reporting `Indeterminate` for a refusal on its first line
+/// looks wrong and is not. That line precedes any write *by Phase 4*,
+/// not any write to the device: Phase 4 accepts only an `ArmedSession`,
+/// which only Phase 3's `wipe` produces, and a failed wipe drops the
+/// session rather than returning it. Holding one means the wipe
+/// completed and the guard inside is armed.
+///
+/// Phase 5 is read-only and still reports `Indeterminate`, because
+/// `Written` means written *and verified*; an unverified device is not
+/// yet that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeviceState {

@@ -62,15 +62,17 @@ impl Events for MyUi {
 fn drive_by_hand(config: &Config, cancel: &AtomicBool, ui: &mut MyUi) -> imi_core::Result<()> {
     let target = imi_core::phases::phase_0::run(config, ui)?;
     let devts = imi_core::phases::phase_1::run(&target, ui)?;
-    let mut guard = imi_core::phases::phase_2::run(&target, &devts, ui)?;
-    imi_core::phases::phase_3::run(&mut guard, &target, cancel, ui)?;
-    let outcome = imi_core::phases::phase_4::run(&mut guard, &target, config.throttle, cancel, ui)?;
-    imi_core::phases::phase_5::run(&mut guard, &target, config, outcome, cancel, ui)?;
+    // Phase 2 takes the target by value and returns it paired with the
+    // claim; Phase 6 hands it back for Phase 7.
+    let session = imi_core::phases::phase_2::run(target, &devts, ui)?;
+    let mut session = imi_core::phases::phase_3::run(session, cancel, ui)?;
+    let outcome = imi_core::phases::phase_4::run(&mut session, config.throttle, cancel, ui)?;
+    imi_core::phases::phase_5::run(&mut session, config, outcome, cancel, ui)?;
     // No `?`: Phase 6 cannot fail.
-    imi_core::phases::phase_6::run(guard, ui);
-    imi_core::phases::phase_7::run(&target, cancel, ui)?;
+    let flashed = imi_core::phases::phase_6::run(session, ui);
+    imi_core::phases::phase_7::run(&flashed, cancel, ui)?;
     // The step that is not a phase, which the crate doc warns about.
-    ui.finished(target.device_path());
+    ui.finished(flashed.device_path());
     Ok(())
 }
 

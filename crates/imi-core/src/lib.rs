@@ -70,13 +70,15 @@
 //! [`run`] and [`run_with_cancel`] are two-line wrappers that supply a
 //! silent sink and a throwaway flag before delegating to it.
 //!
-//! The order is load-bearing: phase *N* assumes phase *N-1* succeeded.
-//! Four of the eight hand something onward — Phase 0 a [`Target`] every
-//! later phase but 6 takes, Phase 1 the devt set Phase 2 needs, Phase 2
-//! the [`FlashGuard`] that Phases 3 to 5 borrow and Phase 6 consumes,
-//! and Phase 4 the [`FlashOutcome`] Phase 5 verifies against. Phases 3,
-//! 5 and 7 return `Result<()>`; Phase 6 returns no type at all and is
-//! the only one that cannot fail.
+//! The order is load-bearing: phase *N* assumes phase *N-1* succeeded,
+//! and the handoffs enforce it. Phase 0 produces a [`Target`]; Phase 1
+//! the devt set Phase 2 needs; Phase 2 consumes the `Target` and returns
+//! a [`Session`] — the guard and that target, paired for good; Phase 3
+//! consumes the `Session` and returns an [`ArmedSession`]; Phases 4 and
+//! 5 borrow it, Phase 4 additionally producing the [`FlashOutcome`]
+//! Phase 5 verifies against; Phase 6 consumes the `ArmedSession` and
+//! hands the `Target` back for Phase 7. Phases 5 and 7 return
+//! `Result<()>`; Phase 6 is the only one that cannot fail.
 //!
 //! One step is not a phase and is easy to miss.  [`run_with`] ends with
 //! `events.finished(&target.dev_canon)`, which is what emits the "you
@@ -139,12 +141,23 @@
 //! purpose, which is letting these types gain fields without a breaking
 //! release.
 //!
-//! For the same reason Phases 3, 4 and 5 verify that the guard they were
-//! given is holding the device the `Target` describes, and refuse a
-//! mismatch before anything destructive happens. Two legitimately
-//! obtained values can still be crossed by a caller driving several
-//! devices; that check turns it into a clean error rather than a write
-//! to the wrong disk.
+//! For the same reason the guard and the `Target` travel as one value
+//! from Phase 2 onward. Two legitimately obtained values from different
+//! devices used to be crossable by a caller driving several at once,
+//! and a runtime check in each phase refused the mismatch; a [`Session`]
+//! has no second `Target` parameter to cross, so the mistake now fails
+//! to compile instead.
+//!
+//! # Choosing a device
+//!
+//! [`candidate_devices`] enumerates the disks an interactive consumer —
+//! the `imi` binary's picker, or a GUI — may safely *offer* as flash
+//! targets, as a list of [`CandidateDevice`] values (path, size, model,
+//! removable). The filter reuses the pipeline's own rules, so a listed
+//! disk is one the pipeline could actually proceed against; the system
+//! disk never appears. It is an offering, not a decision: nothing in
+//! this crate selects a device, and every candidate still passes
+//! through the full Phase 0–2 gauntlet after a human picks it.
 //!
 //! # Privileges and side effects
 //!
@@ -180,10 +193,12 @@ pub mod phases;
 use std::sync::atomic::AtomicBool;
 
 pub use crate::common::context::{FlashOutcome, Target};
-pub use crate::common::guard::{FlashGuard, GuardPhase};
+pub use crate::common::devices::{CandidateDevice, candidate_devices};
+pub use crate::common::guard::{ArmedGuard, FlashGuard, GuardPhase};
 pub use crate::common::identity::DeviceIdentity;
 pub use crate::common::image::Compression;
 pub use crate::common::mount::TargetDevts;
+pub use crate::common::session::{ArmedSession, Session};
 pub use crate::config::Config;
 pub use crate::error::{DeviceState, Error, ErrorKind};
 pub use crate::events::{Events, Phase, PhaseOutcome, Summary};
@@ -220,8 +235,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Propagates a panic from the decompression worker thread, re-raised on
 /// the calling thread by `resume_unwind` after the channels are closed
 /// and the worker joined. Phases 4 and 5b spawn that worker for
-/// compressed images; no other path here panics — the two `expect`s in
-/// the crate are `pub(crate)` and unreachable by construction.
+/// compressed images; no other path here panics — the crate's few
+/// production `expect`s all take a value out of an `Option` that only a
+/// consuming method empties, so each is unreachable by construction.
 ///
 /// The guard's FATAL notice is printed before the panic escapes, so an
 /// operator is told the device state even on this path.
@@ -264,8 +280,9 @@ pub fn run(config: &Config) -> Result<()> {
 /// Propagates a panic from the decompression worker thread, re-raised on
 /// the calling thread by `resume_unwind` after the channels are closed
 /// and the worker joined. Phases 4 and 5b spawn that worker for
-/// compressed images; no other path here panics — the two `expect`s in
-/// the crate are `pub(crate)` and unreachable by construction.
+/// compressed images; no other path here panics — the crate's few
+/// production `expect`s all take a value out of an `Option` that only a
+/// consuming method empties, so each is unreachable by construction.
 ///
 /// The guard's FATAL notice is printed before the panic escapes, so an
 /// operator is told the device state even on this path.
@@ -339,8 +356,9 @@ pub fn run_with_cancel(config: &Config, cancel: &AtomicBool) -> Result<()> {
 /// Propagates a panic from the decompression worker thread, re-raised on
 /// the calling thread by `resume_unwind` after the channels are closed
 /// and the worker joined. Phases 4 and 5b spawn that worker for
-/// compressed images; no other path here panics — the two `expect`s in
-/// the crate are `pub(crate)` and unreachable by construction.
+/// compressed images; no other path here panics — the crate's few
+/// production `expect`s all take a value out of an `Option` that only a
+/// consuming method empties, so each is unreachable by construction.
 ///
 /// The guard's FATAL notice is printed before the panic escapes, so an
 /// operator is told the device state even on this path.
@@ -351,14 +369,17 @@ pub fn run_with<E: Events + ?Sized>(
 ) -> Result<()> {
     let target = phases::phase_0::run(config, events)?;
     let devts = phases::phase_1::run(&target, events)?;
-    let mut guard = phases::phase_2::run(&target, &devts, events)?;
-    phases::phase_3::run(&mut guard, &target, cancel, events)?;
-    let outcome = phases::phase_4::run(&mut guard, &target, config.throttle, cancel, events)?;
-    phases::phase_5::run(&mut guard, &target, config, outcome, cancel, events)?;
-    phases::phase_6::run(guard, events);
-    phases::phase_7::run(&target, cancel, events)?;
+    let session = phases::phase_2::run(target, &devts, events)?;
+    let mut session = phases::phase_3::run(session, cancel, events)?;
+    let outcome = phases::phase_4::run(&mut session, config.throttle, cancel, events)?;
+    phases::phase_5::run(&mut session, config, outcome, cancel, events)?;
+    // Phase 6 hands the target back: it outlives the session, and Phase 7
+    // needs it. Named distinctly from the pre-Phase-2 binding, which was
+    // moved into the session and is gone.
+    let flashed = phases::phase_6::run(session, events);
+    phases::phase_7::run(&flashed, cancel, events)?;
 
-    events.finished(&target.dev_canon);
+    events.finished(&flashed.dev_canon);
     Ok(())
 }
 
@@ -380,15 +401,13 @@ mod tests {
         /// Phases 4 and 5 take five and six parameters; naming the
         /// shapes keeps the pins readable.
         type Phase4 = fn(
-            &mut crate::FlashGuard,
-            &crate::Target,
+            &mut crate::ArmedSession,
             Option<u64>,
             &AtomicBool,
             &mut (),
         ) -> crate::Result<crate::FlashOutcome>;
         type Phase5 = fn(
-            &mut crate::FlashGuard,
-            &crate::Target,
+            &mut crate::ArmedSession,
             &crate::Config,
             crate::FlashOutcome,
             &AtomicBool,
@@ -404,20 +423,18 @@ mod tests {
             crate::phases::phase_0::run::<()>;
         let _: fn(&crate::Target, &mut ()) -> crate::Result<crate::TargetDevts> =
             crate::phases::phase_1::run::<()>;
-        let _: fn(
-            &crate::Target,
-            &crate::TargetDevts,
-            &mut (),
-        ) -> crate::Result<crate::FlashGuard> = crate::phases::phase_2::run::<()>;
-        let _: fn(
-            &mut crate::FlashGuard,
-            &crate::Target,
-            &AtomicBool,
-            &mut (),
-        ) -> crate::Result<()> = crate::phases::phase_3::run::<()>;
+        let _: fn(crate::Target, &crate::TargetDevts, &mut ()) -> crate::Result<crate::Session> =
+            crate::phases::phase_2::run::<()>;
+        // Phase 3 is the arming boundary: it consumes the disarmed session
+        // and yields the armed one. Phases 4 and 5 take `&mut ArmedSession`,
+        // so skipping it does not compile — and neither type has a second
+        // slot a mismatched target could occupy.
+        let _: fn(crate::Session, &AtomicBool, &mut ()) -> crate::Result<crate::ArmedSession> =
+            crate::phases::phase_3::run::<()>;
         let _: Phase4 = crate::phases::phase_4::run::<()>;
         let _: Phase5 = crate::phases::phase_5::run::<()>;
-        let _: fn(crate::FlashGuard, &mut ()) = crate::phases::phase_6::run::<()>;
+        let _: fn(crate::ArmedSession, &mut ()) -> crate::Target =
+            crate::phases::phase_6::run::<()>;
         let _: fn(&crate::Target, &AtomicBool, &mut ()) -> crate::Result<()> =
             crate::phases::phase_7::run::<()>;
     }

@@ -44,38 +44,6 @@ impl Cli {
     pub(crate) fn new(device: std::path::PathBuf) -> Self {
         Self { device, bar: None, bar_started: false }
     }
-
-    /// A byte count in the largest binary unit that keeps it readable.
-    ///
-    /// The banner shows both the exact count and this, because they
-    /// answer different questions: the operator matches the exact bytes
-    /// against what they expect, and reads the scaled figure to notice
-    /// they picked a 32 GiB stick when they meant a 2 TiB disk. A wrong
-    /// divisor here shows a 500 GB disk as something else entirely.
-    ///
-    /// Scaled rather than fixed at GiB: images are routinely far smaller
-    /// than devices, and a 700 MiB ISO rendered as `0.68 GiB` — or a
-    /// 3 MiB one as `0.00 GiB` — tells the reader nothing.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "display-only figure on the confirmation banner; \
-                  sub-ULP rounding beyond 8 EiB is irrelevant"
-    )]
-    fn human_size(bytes: u64) -> String {
-        const KIB: f64 = 1024.0;
-        let b = bytes as f64;
-        for (limit, unit) in [
-            (KIB, "KiB"),
-            (KIB * KIB, "MiB"),
-            (KIB * KIB * KIB, "GiB"),
-            (KIB * KIB * KIB * KIB, "TiB"),
-        ] {
-            if b < limit * KIB {
-                return format!("{:.2} {unit}", b / limit);
-            }
-        }
-        format!("{:.2} PiB", b / (KIB * KIB * KIB * KIB * KIB))
-    }
 }
 
 /// Whether a phase draws the verify bar rather than the flash bar.
@@ -125,6 +93,35 @@ fn keeps_bar_on_screen(outcome: PhaseOutcome) -> bool {
 /// trains people to answer without reading.
 fn response_approves(input: &str) -> bool {
     input.trim() == "yes"
+}
+
+/// A byte count in the largest binary unit that keeps it readable.
+///
+/// The banner shows both the exact count and this, because they
+/// answer different questions: the operator matches the exact bytes
+/// against what they expect, and reads the scaled figure to notice
+/// they picked a 32 GiB stick when they meant a 2 TiB disk. A wrong
+/// divisor here shows a 500 GB disk as something else entirely.
+///
+/// Scaled rather than fixed at GiB: images are routinely far smaller
+/// than devices, and a 700 MiB ISO rendered as `0.68 GiB` — or a
+/// 3 MiB one as `0.00 GiB` — tells the reader nothing.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "display-only figure on the confirmation banner; \
+              sub-ULP rounding beyond 8 EiB is irrelevant"
+)]
+pub(crate) fn human_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    for (limit, unit) in
+        [(KIB, "KiB"), (KIB * KIB, "MiB"), (KIB * KIB * KIB, "GiB"), (KIB * KIB * KIB * KIB, "TiB")]
+    {
+        if b < limit * KIB {
+            return format!("{:.2} {unit}", b / limit);
+        }
+    }
+    format!("{:.2} PiB", b / (KIB * KIB * KIB * KIB * KIB))
 }
 
 impl Events for Cli {
@@ -240,12 +237,12 @@ impl Events for Cli {
         println!(
             "  Size:      {} bytes ({})",
             summary.device_size,
-            Self::human_size(summary.device_size)
+            human_size(summary.device_size)
         );
         println!("  Image:     {}", summary.image.display());
         println!("  Format:    {}", summary.compression);
         if let Some(n) = summary.raw_image_size {
-            println!("  Img size:  {n} bytes ({})", Self::human_size(n));
+            println!("  Img size:  {n} bytes ({})", human_size(n));
         }
         println!();
 
@@ -277,7 +274,7 @@ impl Events for Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::human_size;
     use imi_core::{Phase, PhaseOutcome};
 
     /// Only the verify phase draws the verify bar.
@@ -367,23 +364,23 @@ mod tests {
     #[test]
     fn human_size_uses_binary_units_and_scales() {
         // A real 32 GB stick, the case this format exists for.
-        assert_eq!(Cli::human_size(30_765_219_840), "28.65 GiB");
+        assert_eq!(human_size(30_765_219_840), "28.65 GiB");
 
-        assert_eq!(Cli::human_size(0x4000_0000), "1.00 GiB");
-        assert_eq!(Cli::human_size(8 * 0x4000_0000), "8.00 GiB");
-        assert_eq!(Cli::human_size(0x2000_0000), "512.00 MiB");
-        assert_eq!(Cli::human_size(0x10_0000), "1.00 MiB");
-        assert_eq!(Cli::human_size(700 * 0x10_0000), "700.00 MiB");
-        assert_eq!(Cli::human_size(0x400), "1.00 KiB");
+        assert_eq!(human_size(0x4000_0000), "1.00 GiB");
+        assert_eq!(human_size(8 * 0x4000_0000), "8.00 GiB");
+        assert_eq!(human_size(0x2000_0000), "512.00 MiB");
+        assert_eq!(human_size(0x10_0000), "1.00 MiB");
+        assert_eq!(human_size(700 * 0x10_0000), "700.00 MiB");
+        assert_eq!(human_size(0x400), "1.00 KiB");
 
         // The reason for scaling: fixed GiB would render these as 0.00.
-        assert_eq!(Cli::human_size(3 * 0x10_0000), "3.00 MiB");
-        assert_eq!(Cli::human_size(0), "0.00 KiB");
+        assert_eq!(human_size(3 * 0x10_0000), "3.00 MiB");
+        assert_eq!(human_size(0), "0.00 KiB");
 
         // A decimal divisor would say "1.00 GB"; binary gives 0.93 GiB.
-        assert_eq!(Cli::human_size(1_000_000_000), "953.67 MiB");
+        assert_eq!(human_size(1_000_000_000), "953.67 MiB");
 
         // Above GiB it keeps scaling rather than showing four digits.
-        assert_eq!(Cli::human_size(2 * 1024 * 0x4000_0000), "2.00 TiB");
+        assert_eq!(human_size(2 * 1024 * 0x4000_0000), "2.00 TiB");
     }
 }

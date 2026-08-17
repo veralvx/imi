@@ -21,6 +21,7 @@ imi-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
+dialoguer.workspace = true
 indicatif.workspace = true
 
 [lints]

@@ -105,6 +105,27 @@ fn re_exports_are_reachable_from_the_crate_root() {
     assert!(size_of::<imi_core::Compression>() > 0);
 }
 
+/// Every `CandidateDevice` accessor a picker depends on, by signature.
+///
+/// A downstream picker — the `imi` binary, or a GUI — is built entirely
+/// on these five reads plus the enumeration entry point below. Renaming
+/// one, or narrowing a return type, breaks a consumer this crate cannot
+/// see; this function makes it break here first.
+fn reads_every_candidate_accessor(c: &imi_core::CandidateDevice) -> bool {
+    !c.path().as_os_str().is_empty()
+        && !c.kname().is_empty()
+        && c.size_bytes() > 0
+        && c.model().is_none_or(|m| !m.is_empty())
+        && (c.removable() || !c.removable())
+}
+
+/// The enumeration entry point keeps its shape.
+#[test]
+fn candidate_enumeration_is_pinned() {
+    let _: fn() -> imi_core::Result<Vec<imi_core::CandidateDevice>> = imi_core::candidate_devices;
+    let _: fn(&imi_core::CandidateDevice) -> bool = reads_every_candidate_accessor;
+}
+
 /// `Target`'s fields are private and readable only through getters.
 ///
 /// `#[non_exhaustive]` alone was not enough: it blocks constructing a
@@ -126,35 +147,28 @@ fn returned_types_stay_readable_downstream() {
 fn phase_entry_points_chain_from_outside_the_crate() {
     /// Phases 4 and 5 take five and six parameters; naming the shapes
     /// keeps the pins readable and satisfies the complexity lint.
-    type Phase4 = fn(
-        &mut FlashGuard,
-        &Target,
-        Option<u64>,
-        &AtomicBool,
-        &mut (),
-    ) -> imi_core::Result<FlashOutcome>;
+    type Phase4 =
+        fn(&mut ArmedSession, Option<u64>, &AtomicBool, &mut ()) -> imi_core::Result<FlashOutcome>;
 
-    type Phase5 = fn(
-        &mut FlashGuard,
-        &Target,
-        &Config,
-        FlashOutcome,
-        &AtomicBool,
-        &mut (),
-    ) -> imi_core::Result<()>;
+    type Phase5 =
+        fn(&mut ArmedSession, &Config, FlashOutcome, &AtomicBool, &mut ()) -> imi_core::Result<()>;
 
-    use imi_core::{Config, FlashGuard, FlashOutcome, Target, TargetDevts};
+    use imi_core::{ArmedSession, Config, FlashOutcome, Session, Target, TargetDevts};
 
     let _: fn(&Config, &mut ()) -> imi_core::Result<Target> = imi_core::phases::phase_0::run::<()>;
     let _: fn(&Target, &mut ()) -> imi_core::Result<TargetDevts> =
         imi_core::phases::phase_1::run::<()>;
-    let _: fn(&Target, &TargetDevts, &mut ()) -> imi_core::Result<FlashGuard> =
+    // Phase 2 takes the target by value and pairs it with the claim; from
+    // here to Phase 6 the two travel as one value, so no later signature
+    // has anywhere to put a mismatched target.
+    let _: fn(Target, &TargetDevts, &mut ()) -> imi_core::Result<Session> =
         imi_core::phases::phase_2::run::<()>;
-    let _: fn(&mut FlashGuard, &Target, &AtomicBool, &mut ()) -> imi_core::Result<()> =
+    let _: fn(Session, &AtomicBool, &mut ()) -> imi_core::Result<ArmedSession> =
         imi_core::phases::phase_3::run::<()>;
     let _: Phase4 = imi_core::phases::phase_4::run::<()>;
     let _: Phase5 = imi_core::phases::phase_5::run::<()>;
-    let _: fn(FlashGuard, &mut ()) = imi_core::phases::phase_6::run::<()>;
+    // Phase 6 hands the target back out, for Phase 7.
+    let _: fn(ArmedSession, &mut ()) -> Target = imi_core::phases::phase_6::run::<()>;
     let _: fn(&Target, &AtomicBool, &mut ()) -> imi_core::Result<()> =
         imi_core::phases::phase_7::run::<()>;
 
@@ -231,6 +245,7 @@ fn every_public_type_implements_debug() {
     assert_debug::<imi_core::Target>();
     assert_debug::<imi_core::TargetDevts>();
     assert_debug::<imi_core::FlashGuard>();
+    assert_debug::<imi_core::ArmedGuard>();
     assert_debug::<imi_core::GuardPhase>();
     assert_debug::<imi_core::DeviceIdentity>();
     assert_debug::<imi_core::Compression>();
@@ -256,8 +271,13 @@ fn every_public_type_implements_debug() {
 /// window.
 #[test]
 fn guard_state_is_observable_downstream() {
-    let _: fn(&imi_core::FlashGuard) -> imi_core::GuardPhase = imi_core::FlashGuard::current_phase;
-    let _: fn(&imi_core::FlashGuard) -> bool = imi_core::FlashGuard::would_warn_on_drop;
+    // Since the typestate split, the observable one is `ArmedGuard`.
+    // `FlashGuard`'s equivalents went crate-internal because they became
+    // constants: `arm` consumes the guard and `disarm` clears the phase,
+    // so every `FlashGuard` a consumer can hold reports `Disarmed` and
+    // would not warn. Whether the run is inside the destructive window is
+    // now answered by which type you are holding.
+    let _: fn(&imi_core::ArmedGuard) -> imi_core::GuardPhase = imi_core::ArmedGuard::current_phase;
 
     // The variants a caller may need to compare against.
     assert_ne!(imi_core::GuardPhase::Disarmed, imi_core::GuardPhase::Writing);
@@ -348,6 +368,12 @@ fn public_types_stay_send_and_sync() {
     assert_sync::<imi_core::TargetDevts>();
     assert_send::<imi_core::FlashGuard>();
     assert_sync::<imi_core::FlashGuard>();
+    // The typestate split added a second public guard type. Pinned
+    // alongside the first, because a future field that is not `Send`
+    // would otherwise pass every gate and break a consumer moving the
+    // guard between the phases that produce and consume it.
+    assert_send::<imi_core::ArmedGuard>();
+    assert_sync::<imi_core::ArmedGuard>();
     assert_send::<imi_core::GuardPhase>();
     assert_sync::<imi_core::GuardPhase>();
     assert_send::<imi_core::DeviceIdentity>();

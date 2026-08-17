@@ -111,7 +111,7 @@ impl TargetDevts {
     /// exercise `mounts_on_target` and the `contains` predicate without
     /// requiring a real block device on the test host.
     #[cfg(test)]
-    fn from_set_for_test(set: HashSet<(u64, u64)>) -> Self {
+    pub(crate) fn from_set_for_test(set: HashSet<(u64, u64)>) -> Self {
         Self { set }
     }
 }
@@ -188,6 +188,15 @@ fn unescape_proc_octal(s: &str) -> String {
         rest = tail;
     }
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// Filter an already-read mountinfo text against a devt set.
+///
+/// The injectable half of [`mounts_on_target`], for callers that read
+/// `/proc/self/mountinfo` once and check many devt sets against it —
+/// the candidate filter does, and its tests supply synthetic text.
+pub(crate) fn mounts_in_text(text: &str, target: &TargetDevts) -> Vec<MountInfo> {
+    filter_mountinfo(text, target, block_rdev_of)
 }
 
 /// Parse `/proc/self/mountinfo` and filter to entries on the target disk.
@@ -1288,7 +1297,7 @@ also garbage
                 "/dev/loop0 is a block device and must yield a devt"
             );
         }
-        fs::remove_file(&file).unwrap();
+        fs::remove_file(&*file).unwrap();
     }
 
     /// sysfs writes `major:minor`; everything else is a malformed file.

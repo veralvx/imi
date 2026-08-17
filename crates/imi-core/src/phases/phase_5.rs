@@ -38,11 +38,11 @@ use crate::Result;
 use crate::common::aligned::{AlignedBuf, BUF_SIZE};
 use crate::common::cancel::cancellable_sleep;
 use crate::common::context::FlashOutcome;
-use crate::common::context::Target;
 use crate::common::direct_io::set_direct;
-use crate::common::guard::{ArmedPhase, FlashGuard};
+use crate::common::guard::{ArmedGuard, ArmedPhase};
 use crate::common::image::{Compression, ImageReader};
 use crate::common::ioctl;
+use crate::common::session::ArmedSession;
 use crate::common::throttle::chunk_target_nanos;
 use crate::config::Config;
 use crate::error::{Cancelled, VerificationMismatch};
@@ -77,14 +77,13 @@ use crate::events::{Events, Phase as UiPhase, PhaseOutcome};
 /// Propagates a panic from the decompression worker thread, re-raised
 /// on this thread after the channels are closed and the worker joined.
 pub fn run<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
-    target: &Target,
+    session: &mut ArmedSession,
     config: &Config,
     outcome: FlashOutcome,
     cancel: &AtomicBool,
     events: &mut E,
 ) -> Result<()> {
-    let outcome = run_inner(guard, target, config, outcome, cancel, events)
+    let outcome = run_inner(session, config, outcome, cancel, events)
         .map_err(|e| e.at(crate::DeviceState::Indeterminate));
     events.phase_finished(
         UiPhase::Verify,
@@ -98,14 +97,21 @@ pub fn run<E: Events + ?Sized>(
 /// Split from [`run`] so that every exit path passes through one
 /// place that maps the device state and emits `phase_finished`.
 fn run_inner<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
-    target: &Target,
+    session: &mut ArmedSession,
     config: &Config,
     outcome: FlashOutcome,
     cancel: &AtomicBool,
     events: &mut E,
 ) -> Result<()> {
-    guard.ensure_device_is(&target.dev_canon).context("Phase 5")?;
+    // Phase 4 has always refused a disarmed guard; this phase did not, so
+    // in release its two `set_phase` calls would silently arm a guard
+    // Phase 3 never armed — and the guard would then warn on drop about a
+    // device this run never wrote.
+    //
+    // Holding a `FlashOutcome` does not close the gap on its own. An
+    // outcome from one device can be paired with a fresh guard from
+    // another, and the check above passes, because that guard and that
+    // target do agree with each other.
 
     // Phase 5a — hardware cooldown. Runs unless --skip-cooldown.
     //
@@ -119,7 +125,7 @@ fn run_inner<E: Events + ?Sized>(
     if config.skip_cooldown {
         events.phase_skipped(UiPhase::Cooldown);
     } else {
-        guard.set_phase(ArmedPhase::Cooldown);
+        session.set_phase(ArmedPhase::Cooldown);
         cooldown(10, cancel, events).context("Phase 5a: hardware cooldown")?;
     }
 
@@ -127,12 +133,19 @@ fn run_inner<E: Events + ?Sized>(
     if config.skip_verification {
         events.phase_skipped(UiPhase::Verify);
     } else {
-        guard.set_phase(ArmedPhase::Verifying);
+        session.set_phase(ArmedPhase::Verifying);
         events.phase_started(UiPhase::Verify);
+
+        // Hoisted for the same reason as Phase 4: `verify` takes
+        // `session.guard_mut()`, so reading `session.target()` in the
+        // same expression borrows the session both ways (E0502).
+        let img_canon = session.target().img_canon.clone();
+        let comp = session.target().comp;
+
         verify(
-            guard,
-            &target.img_canon,
-            target.comp,
+            session.guard_mut(),
+            &img_canon,
+            comp,
             outcome.bytes_written,
             config.throttle,
             cancel,
@@ -179,7 +192,7 @@ pub(crate) fn cooldown<E: Events + ?Sized>(
 /// device read on a worker thread. The public contract (signature,
 /// mismatch diagnostic, error chains, progress output) is unchanged.
 pub(crate) fn verify<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
+    guard: &mut ArmedGuard,
     image_path: &Path,
     comp: Compression,
     bytes_written: u64,
@@ -241,7 +254,7 @@ pub(crate) fn verify<E: Events + ?Sized>(
               for every caller"
 )]
 fn verify_serial<E: Events + ?Sized>(
-    guard: &mut FlashGuard,
+    guard: &mut ArmedGuard,
     mut img: ImageReader,
     image_path: &Path,
     bytes_written: u64,
@@ -408,7 +421,7 @@ fn verify_worker_loop<R: Read>(
               for every caller"
 )]
 fn verify_pipelined<R: Read + Send + 'static, E: Events + ?Sized>(
-    guard: &mut FlashGuard,
+    guard: &mut ArmedGuard,
     img: R,
     image_path: &Path,
     bytes_written: u64,
@@ -630,12 +643,11 @@ fn fill_exact<R: Read>(r: &mut R, dst: &mut [u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::{Recorder, TempPath};
+    use crate::common::guard::FlashGuard;
+    use crate::common::testing::{ArmedForTest, Recorder, TempPath};
     use crate::events::{Phase as UiPhase, PhaseOutcome};
     use std::io::{Cursor, ErrorKind};
 
-    /// Happy path: reader has at least `dst.len()` bytes; we read exactly
-    /// that many.
     #[test]
     fn fill_exact_succeeds_when_data_abundant() {
         let data: Vec<u8> = (0..200).cycle().take(1000).collect();
@@ -800,20 +812,22 @@ mod tests {
     ///
     /// The returned [`TempPath`] unlinks itself on drop, so a failing
     /// assertion cannot leave the file behind.
-    fn tempfile_guard(tag: &str, contents: &[u8]) -> (FlashGuard, TempPath) {
+    fn tempfile_guard(tag: &str, contents: &[u8]) -> (ArmedForTest, TempPath) {
         let p = TempPath::new(&format!("vfy-{tag}"));
         std::fs::write(&*p, contents).unwrap();
         let f = std::fs::OpenOptions::new().read(true).write(true).open(&*p).unwrap();
-        (FlashGuard::new(f, p.to_path_buf()), p)
+        (ArmedForTest::new(FlashGuard::new(f, p.to_path_buf()).arm(ArmedPhase::Writing)), p)
     }
 
     /// Gzip `payload` to a temp file and open it as an `ImageReader`.
-    fn gzip_reader(tag: &str, payload: &[u8]) -> (ImageReader, std::path::PathBuf) {
+    fn gzip_reader(tag: &str, payload: &[u8]) -> (ImageReader, TempPath) {
         use std::io::Write as _;
-        let p = std::env::temp_dir().join(format!("imi-vfy-{tag}-{}.gz", std::process::id()));
+        // `TempPath` unlinks on drop, so a failing assertion in the caller
+        // cannot leave the compressed fixture behind.
+        let p = TempPath::new(&format!("vfy-{tag}"));
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(payload).unwrap();
-        std::fs::write(&p, enc.finish().unwrap()).unwrap();
+        std::fs::write(&*p, enc.finish().unwrap()).unwrap();
         (ImageReader::open(&p, Compression::Gzip).unwrap(), p)
     }
 
@@ -823,7 +837,7 @@ mod tests {
     fn verify_worker_paces_chunks_by_bytes_written() {
         let total = BUF_SIZE as u64 + 137;
         let payload = vec![0x6D_u8; BUF_SIZE + 137];
-        let (reader, img_p) = gzip_reader("pace", &payload);
+        let (reader, _img_p) = gzip_reader("pace", &payload);
 
         let (filled_tx, filled_rx) = mpsc::channel::<FilledItem>();
         let (free_tx, free_rx) = mpsc::channel::<AlignedBuf>();
@@ -840,7 +854,6 @@ mod tests {
         assert_eq!(n2, 137);
         assert!(filled_rx.recv().is_err(), "worker must exit after the last chunk");
         h.join().unwrap();
-        std::fs::remove_file(&img_p).unwrap();
     }
 
     /// Verify must walk *every* chunk of a multi-chunk device.
@@ -859,9 +872,9 @@ mod tests {
         let len = 2 * BUF_SIZE + 4096;
         let payload: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
 
-        let img_p = std::env::temp_dir().join(format!("imi-walk-{}.img", std::process::id()));
+        let img_p = TempPath::new("walk");
         std::fs::write(&img_p, &payload).unwrap();
-        let (mut guard, dev_p) = tempfile_guard("walk", &payload);
+        let (mut guard, _dev_p) = tempfile_guard("walk", &payload);
 
         let reader = ImageReader::open(&img_p, Compression::Raw).unwrap();
         let cancel = AtomicBool::new(false);
@@ -875,11 +888,6 @@ mod tests {
             &mut (),
         )
         .expect("an identical multi-chunk device must verify clean");
-
-        guard.disarm();
-        drop(guard);
-        std::fs::remove_file(&dev_p).unwrap();
-        std::fs::remove_file(&img_p).unwrap();
     }
 
     /// Happy path end to end: device contents equal the decompressed
@@ -889,13 +897,11 @@ mod tests {
     fn pipelined_verify_accepts_matching_device() {
         let mut payload = vec![0x2E_u8; BUF_SIZE];
         payload.extend_from_slice(&[0xE2; 137]);
-        let (mut guard, dev_p) = tempfile_guard("ok", &payload);
+        let (mut guard, _dev_p) = tempfile_guard("ok", &payload);
         let (reader, img_p) = gzip_reader("ok", &payload);
         let cancel = AtomicBool::new(false);
         verify_pipelined(&mut guard, reader, &img_p, payload.len() as u64, None, &cancel, &mut ())
             .unwrap();
-        std::fs::remove_file(&dev_p).unwrap();
-        std::fs::remove_file(&img_p).unwrap();
     }
 
     /// A single corrupted device byte in the SECOND chunk is reported at
@@ -907,7 +913,7 @@ mod tests {
         let (reader, img_p) = gzip_reader("mm", &payload);
         let corrupt_at = BUF_SIZE + 1000;
         payload[corrupt_at] ^= 0xFF;
-        let (mut guard, dev_p) = tempfile_guard("mm", &payload);
+        let (mut guard, _dev_p) = tempfile_guard("mm", &payload);
         let cancel = AtomicBool::new(false);
         let err = verify_pipelined(
             &mut guard,
@@ -923,8 +929,6 @@ mod tests {
             err.to_string().contains(&format!("mismatch at byte offset {corrupt_at}")),
             "{err}"
         );
-        std::fs::remove_file(&dev_p).unwrap();
-        std::fs::remove_file(&img_p).unwrap();
     }
 
     /// Arm parity on the failure path: serial and pipelined report the
@@ -983,7 +987,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // MIRI ICE
     fn pipelined_verify_resumes_worker_panic_on_main_thread() {
-        let (mut guard, dev_p) = tempfile_guard("panic", &vec![0_u8; 8192]);
+        let (mut guard, _dev_p) = tempfile_guard("panic", &vec![0_u8; 8192]);
         let cancel = AtomicBool::new(false);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             verify_pipelined(
@@ -997,7 +1001,6 @@ mod tests {
             )
         }));
         assert!(caught.is_err(), "worker panic must resume on main");
-        std::fs::remove_file(&dev_p).unwrap();
     }
 
     /// A truncated image stream surfaces the worker's fill error with
@@ -1012,7 +1015,7 @@ mod tests {
         std::fs::write(&img_p, &full[..40]).unwrap();
         let reader = ImageReader::open(&img_p, Compression::Gzip).unwrap();
 
-        let (mut guard, dev_p) = tempfile_guard("werr", &payload);
+        let (mut guard, _dev_p) = tempfile_guard("werr", &payload);
         let cancel = AtomicBool::new(false);
         let err = verify_pipelined(
             &mut guard,
@@ -1025,8 +1028,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("from image stream"), "{err:#}");
-        std::fs::remove_file(&dev_p).unwrap();
-        std::fs::remove_file(&img_p).unwrap();
     }
 
     /// V5 (verify flavor): a verify worker parked on the pool exits
@@ -1070,7 +1071,7 @@ mod tests {
         let (reader, img_p) = gzip_reader("short", &payload);
         // Device claims twice the bytes the image actually decodes to.
         let claimed = 2 * payload.len();
-        let (mut guard, dev_p) = tempfile_guard("short", &vec![0x44_u8; claimed]);
+        let (mut guard, _dev_p) = tempfile_guard("short", &vec![0x44_u8; claimed]);
         let cancel = AtomicBool::new(false);
         let err =
             verify_pipelined(&mut guard, reader, &img_p, claimed as u64, None, &cancel, &mut ())
@@ -1083,8 +1084,6 @@ mod tests {
         // verification mismatch, and a consumer branching on kind() must
         // tell them apart without reading the text.
         assert_eq!(err.kind(), crate::ErrorKind::Failed, "{chain}");
-        std::fs::remove_file(&dev_p).unwrap();
-        std::fs::remove_file(&img_p).unwrap();
     }
 
     /// The cooldown must report itself, not just sleep.

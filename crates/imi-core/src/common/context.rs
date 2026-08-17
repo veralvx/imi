@@ -50,7 +50,7 @@ use crate::common::image::Compression;
 /// }
 /// # Ok::<(), imi_core::Error>(())
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Target {
     /// Canonicalised path to the source image.
@@ -156,10 +156,10 @@ impl Target {
 /// # let config = imi_core::Config::new(PathBuf::from("a.iso"), PathBuf::from("/dev/sdc"));
 /// # let target = imi_core::phases::phase_0::run(&config, &mut ())?;
 /// # let devts = imi_core::phases::phase_1::run(&target, &mut ())?;
-/// # let mut guard = imi_core::phases::phase_2::run(&target, &devts, &mut ())?;
+/// # let session = imi_core::phases::phase_2::run(target, &devts, &mut ())?;
 /// # let cancel = AtomicBool::new(false);
-/// # imi_core::phases::phase_3::run(&mut guard, &target, &cancel, &mut ())?;
-/// let outcome = imi_core::phases::phase_4::run(&mut guard, &target, None, &cancel, &mut ())?;
+/// # let mut session = imi_core::phases::phase_3::run(session, &cancel, &mut ())?;
+/// let outcome = imi_core::phases::phase_4::run(&mut session, None, &cancel, &mut ())?;
 /// println!("wrote {} bytes", outcome.bytes_written());
 /// # Ok::<(), imi_core::Error>(())
 /// ```

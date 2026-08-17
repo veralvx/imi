@@ -28,8 +28,14 @@ pub(crate) struct Cli {
     pub(crate) img: PathBuf,
 
     /// Target block device, e.g. /dev/sdc. Must be a whole disk, not a partition.
+    /// Omit to pick interactively: candidate devices are listed (path,
+    /// size, model; removable first) for arrow-key selection. Only whole
+    /// disks with media, no block-layer holders, and no mounts outside
+    /// /media, /run/media, /var/run/media are offered, so the system
+    /// disk never appears. Esc aborts; without a terminal the candidates
+    /// are printed and the run refuses. Nothing is ever auto-selected.
     #[arg(short = 'd', long = "dev", value_name = "DEVICE")]
-    pub(crate) dev: PathBuf,
+    pub(crate) dev: Option<PathBuf>,
 
     /// Write/read rate cap (e.g. 500K, 8M, 1G). Omit flag entirely for
     /// unthrottled; pass `-t` with no value to default to 8M.
@@ -118,8 +124,8 @@ impl Cli {
     ///
     /// The core deliberately knows nothing about `clap`; this is the one
     /// place the two vocabularies meet.
-    pub(crate) fn to_config(&self) -> Config {
-        let mut config = Config::new(self.img.clone(), self.dev.clone());
+    pub(crate) fn to_config(&self, dev: PathBuf) -> Config {
+        let mut config = Config::new(self.img.clone(), dev);
         config.yes = self.yes;
         config.throttle = self.throttle;
         config.skip_cooldown = self.skip_cooldown;
@@ -304,14 +310,31 @@ mod tests {
             "--skip-verification",
         ])
         .unwrap()
-        .to_config();
+        .to_config(std::path::PathBuf::from("/dev/test-resolved"));
 
         assert_eq!(config.img, std::path::PathBuf::from("/tmp/src.iso"));
-        assert_eq!(config.dev, std::path::PathBuf::from("/dev/loop9"));
+        // `-d` no longer reaches `to_config`; resolution happens in `picker`
+        // and the resolved path is passed in. The parse itself is pinned by
+        // `dev_flag_parses_into_the_option` below.
+        assert_eq!(config.dev, std::path::PathBuf::from("/dev/test-resolved"));
         assert!(config.yes);
         assert_eq!(config.throttle, Some(1024));
         assert!(config.skip_cooldown);
         assert!(config.skip_verification);
+    }
+
+    /// `-d` parses into `Some`, and omitting it parses into `None`.
+    ///
+    /// `None` is what routes `main` through the picker, so this is the
+    /// contract between the CLI and `picker::resolve_device`: an omitted
+    /// flag must be representable, not an error.
+    #[test]
+    fn dev_flag_parses_into_the_option() {
+        let with = Cli::try_parse_from(["imi", "-i", "/i", "-d", "/dev/sdz"]).unwrap();
+        assert_eq!(with.dev.as_deref(), Some(std::path::Path::new("/dev/sdz")));
+
+        let without = Cli::try_parse_from(["imi", "-i", "/i"]).unwrap();
+        assert_eq!(without.dev, None, "omitting --dev must parse, not error");
     }
 
     /// The two skip flags are independent and must not be swapped: each
@@ -321,14 +344,14 @@ mod tests {
     fn to_config_keeps_the_skip_flags_independent() {
         let cooldown_only = Cli::try_parse_from(["imi", "-i", "/i", "-d", "/d", "--skip-cooldown"])
             .unwrap()
-            .to_config();
+            .to_config(std::path::PathBuf::from("/dev/test-resolved"));
         assert!(cooldown_only.skip_cooldown);
         assert!(!cooldown_only.skip_verification, "--skip-cooldown must not skip verification");
 
         let verify_only =
             Cli::try_parse_from(["imi", "-i", "/i", "-d", "/d", "--skip-verification"])
                 .unwrap()
-                .to_config();
+                .to_config(std::path::PathBuf::from("/dev/test-resolved"));
         assert!(verify_only.skip_verification);
         assert!(!verify_only.skip_cooldown, "--skip-verification must not skip the cooldown");
     }
@@ -336,7 +359,9 @@ mod tests {
     /// With no flags, every safety step must remain enabled.
     #[test]
     fn to_config_defaults_keep_every_safety_step() {
-        let config = Cli::try_parse_from(["imi", "-i", "/i", "-d", "/d"]).unwrap().to_config();
+        let config = Cli::try_parse_from(["imi", "-i", "/i", "-d", "/d"])
+            .unwrap()
+            .to_config(std::path::PathBuf::from("/dev/test-resolved"));
         assert!(!config.yes, "confirmation must be required by default");
         assert!(config.throttle.is_none(), "throttle must default to unlimited");
         assert!(!config.skip_cooldown, "cooldown must run by default");

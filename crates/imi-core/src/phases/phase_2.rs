@@ -41,6 +41,7 @@ use crate::Result;
 use crate::common::context::Target;
 use crate::common::guard::FlashGuard;
 use crate::common::mount::{self, TargetDevts};
+use crate::common::session::Session;
 use crate::error::Context as _;
 use crate::events::{Events, Phase as UiPhase, PhaseOutcome};
 
@@ -55,10 +56,10 @@ use crate::events::{Events, Phase as UiPhase, PhaseOutcome};
 /// since Phase 1, or if the device identity no longer matches the one
 /// the operator confirmed — the replug TOCTOU check.
 pub fn run<E: Events + ?Sized>(
-    target: &Target,
+    target: Target,
     devts: &TargetDevts,
     events: &mut E,
-) -> Result<FlashGuard> {
+) -> Result<Session> {
     let outcome = run_inner(target, devts, events).map_err(|e| e.at(crate::DeviceState::Untouched));
     events.phase_finished(
         UiPhase::Claim,
@@ -72,10 +73,10 @@ pub fn run<E: Events + ?Sized>(
 /// Split from [`run`] so that every exit path passes through one
 /// place that maps the device state and emits `phase_finished`.
 fn run_inner<E: Events + ?Sized>(
-    target: &Target,
+    target: Target,
     devts: &TargetDevts,
     events: &mut E,
-) -> Result<FlashGuard> {
+) -> Result<Session> {
     events.phase_started(UiPhase::Claim);
     let dev_file =
         open_exclusive(&target.dev_canon).context("Phase 2: opening target device with O_EXCL")?;
@@ -95,7 +96,10 @@ fn run_inner<E: Events + ?Sized>(
         .verify_claimed(&guard, &target.dev_kname)
         .context("Phase 2: re-verifying device identity under lock")?;
 
-    Ok(guard)
+    // Paired last, not at `FlashGuard::new`: the identity re-check above
+    // takes a bare `&FlashGuard`, so wrapping earlier would need the
+    // session to lend one out before the pairing has been justified.
+    Ok(Session::new(guard, target))
 }
 
 /// The flags the claim is made with, beside `O_RDWR` from

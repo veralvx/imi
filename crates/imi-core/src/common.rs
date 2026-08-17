@@ -47,6 +47,7 @@
 pub(crate) mod aligned;
 pub(crate) mod cancel;
 pub(crate) mod context;
+pub(crate) mod devices;
 pub(crate) mod direct_io;
 pub(crate) mod geometry;
 pub(crate) mod guard;
@@ -54,6 +55,7 @@ pub(crate) mod identity;
 pub(crate) mod image;
 pub(crate) mod ioctl;
 pub(crate) mod mount;
+pub(crate) mod session;
 pub(crate) mod sysfs;
 #[cfg(test)]
 pub(crate) mod testing;

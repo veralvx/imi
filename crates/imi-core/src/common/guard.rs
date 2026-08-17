@@ -12,13 +12,20 @@
 //! Phase 6, and the FD is still held under `O_EXCL`), but the verb in the
 //! warning matters for operator trust.
 //!
-//! Lifecycle:
-//! 1. `FlashGuard::new(file, dev_path)` right after the `O_EXCL` open. Disarmed.
-//! 2. `guard.arm(GuardPhase::WipingSignatures)` immediately before Phase 3.
-//! 3. `guard.set_phase(GuardPhase::Writing)` at the start of Phase 4.
-//! 4. `guard.set_phase(GuardPhase::Cooldown)` at the start of Phase 5a.
-//! 5. `guard.set_phase(GuardPhase::Verifying)` at the start of Phase 5b.
-//! 6. `guard.disarm()` after verification (Phase 5) passes.
+//! Lifecycle. Note which steps *consume* their receiver — the transitions
+//! between the two types do, so the value must be rebound:
+//!
+//! 1. `let guard = FlashGuard::new(file, dev_path)` right after the
+//!    `O_EXCL` open. Disarmed.
+//! 2. `let armed = guard.arm(ArmedPhase::WipingSignatures)` immediately
+//!    before Phase 3. Consumes the `FlashGuard`; the result is
+//!    `#[must_use]`, because an `ArmedGuard` dropped on the spot prints
+//!    the FATAL notice over a device nothing has touched.
+//! 3. `armed.set_phase(ArmedPhase::Writing)` at the start of Phase 4.
+//! 4. `armed.set_phase(ArmedPhase::Cooldown)` at the start of Phase 5a.
+//! 5. `armed.set_phase(ArmedPhase::Verifying)` at the start of Phase 5b.
+//! 6. `let guard = armed.disarm()` after verification (Phase 5) passes.
+//!    Consumes the `ArmedGuard`.
 //! 7. `guard.into_file()` when the caller wants the `File` back to drop it
 //!    before Phase 7 (releasing the `O_EXCL` claim so udisks2 can see it).
 //!
@@ -29,10 +36,7 @@
 use std::fs::File;
 use std::io::{self, Write as _};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::Path;
 
-use crate::Result;
-use crate::error::bail;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -147,38 +151,51 @@ impl FlashGuard {
 
     /// Arm the guard for the given phase. From this point, any early drop
     /// prints the warning with a phase-appropriate verb.
-    pub(crate) fn arm(&self, phase: ArmedPhase) {
+    pub(crate) fn arm(self, phase: ArmedPhase) -> ArmedGuard {
         self.phase.store(GuardPhase::from(phase) as u8, Ordering::SeqCst);
+        ArmedGuard { inner: Some(self) }
     }
 
     /// Update which phase the guard is currently in. The guard must already
     /// be armed (i.e. you cannot use `set_phase` to arm an initially-disarmed
     /// guard — call `arm()` for that, to make the intent explicit at the
     /// arming point).
-    pub(crate) fn set_phase(&self, phase: ArmedPhase) {
+    fn advance_phase(&self, phase: ArmedPhase) {
         // A `debug_assert`, and therefore absent from the builds a
         // consumer ships. That is tolerable only because arming a
         // disarmed guard fails *loud*: the guard starts warning on drop
         // rather than staying silent, so the worst outcome is a FATAL
         // notice over a device that was never written.
         //
-        // Phase 4 additionally refuses a disarmed guard at runtime, so
-        // its call is covered in release too. Phase 5's two calls are
-        // not — nothing there checks the guard was armed, and a caller
-        // driving the phases by hand could reach Phase 5 without Phases
-        // 3 and 4. Verification then compares an unwritten device
-        // against the image and fails, which catches it, but by
-        // consequence rather than by design.
-        debug_assert_ne!(
-            self.phase.load(Ordering::SeqCst),
-            GuardPhase::Disarmed as u8,
-            "set_phase called on a disarmed guard"
-        );
-        self.phase.store(GuardPhase::from(phase) as u8, Ordering::SeqCst);
+        // Total by construction: this advances an *already armed* guard
+        // and cannot create an armed one.
+        //
+        // It used to `store` unconditionally under a `debug_assert`,
+        // which is absent from the builds a consumer ships — so in
+        // release, calling it on a disarmed guard silently armed it, and
+        // the guard then warned on drop about a device the run never
+        // wrote. A false FATAL, and false ones are what teach an operator
+        // to ignore the real ones.
+        //
+        // `try_update` rather than load-then-store: the read and the
+        // write are one operation, so the answer cannot change between
+        // them. Nothing shares a guard across threads today — only the
+        // main thread touches the descriptor, see `11-threading.md` — but
+        // a total operation that is also atomic costs nothing and removes
+        // the question from a future reader.
+        //
+        // This does not replace `ensure_armed`, which answers a different
+        // question: whether Phase 3 wiped the device. A caller reaching
+        // Phase 4 or 5 without that needs an error, not a silently
+        // skipped state change.
+        let _unchanged_if_disarmed =
+            self.phase.try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                (current != GuardPhase::Disarmed as u8).then_some(GuardPhase::from(phase) as u8)
+            });
     }
 
     /// Disarm the guard. Subsequent drops are silent.
-    pub(crate) fn disarm(&self) {
+    fn clear_phase(&self) {
         self.phase.store(GuardPhase::Disarmed as u8, Ordering::SeqCst);
     }
 
@@ -201,13 +218,17 @@ impl FlashGuard {
     /// FATAL notice they drive is written to stderr from `Drop`, which
     /// no in-process test observes.
     ///
-    /// Public so a caller driving [`crate::phases`] by hand can tell
-    /// whether it is inside the destructive window — everything from
-    /// Phase 3's arm to Phase 6's disarm — and report accordingly. It is
-    /// also what makes [`GuardPhase`] a usable type rather than an
-    /// exported name with no producer.
-    #[must_use]
-    pub fn current_phase(&self) -> GuardPhase {
+    /// Crate-internal, and the narrowing is the typestate split's doing.
+    ///
+    /// This was `pub` so a caller driving [`crate::phases`] by hand could
+    /// tell whether it was inside the destructive window. It cannot
+    /// usefully answer that any more: a consumer holding a `FlashGuard`
+    /// is outside the window *by construction*, so the answer is always
+    /// `Disarmed`. The question moved to the type, and the informative
+    /// version is [`ArmedGuard::current_phase`], which is `pub` and is
+    /// what keeps [`GuardPhase`] a produced type rather than an exported
+    /// name with no producer.
+    pub(crate) fn current_phase(&self) -> GuardPhase {
         GuardPhase::from_u8(self.phase.load(Ordering::SeqCst))
     }
 
@@ -219,35 +240,42 @@ impl FlashGuard {
     /// check would mean staying silent on a half-written device and
     /// crying wolf on a clean one — the single worst failure this type
     /// can have.
-    #[must_use]
-    pub fn would_warn_on_drop(&self) -> bool {
+    /// Crate-internal since the typestate split: for every `FlashGuard` a
+    /// consumer can hold this is `false`. `arm` consumes the guard into an
+    /// `ArmedGuard`, and `disarm` clears the phase on the way back, so the
+    /// only guard for which it is `true` lives inside an `ArmedGuard` and
+    /// is not publicly reachable. A public method that always answers the
+    /// same thing tells a caller nothing and invites them to build on it.
+    /// Private for the same reason as [`Self::current_phase`]: a consumer
+    /// holding a `FlashGuard` is outside the destructive window, so this
+    /// is constantly `false` for them. It survives as the predicate
+    /// `fatal_notice` consults.
+    fn would_warn_on_drop(&self) -> bool {
         !matches!(self.current_phase(), GuardPhase::Disarmed)
     }
 
-    /// Refuse to act if this guard is not holding `expected`.
+    /// The notice this guard would print if dropped now, if any.
     ///
-    /// Phases 3, 4 and 5 each receive a [`FlashGuard`] and a `Target`
-    /// separately, and nothing in the type system ties the two together.
-    /// Inside `crate::run` they always agree, but the phases are public:
-    /// a caller driving two devices concurrently could cross the values
-    /// and write one image onto the other device — silently, since the
-    /// guard would accept the writes. This turns that into a clean
-    /// refusal before anything destructive happens.
+    /// Extracted from `Drop` so the decision and the wording are testable
+    /// without a process that can observe stderr. `Drop` is then a thin
+    /// I/O wrapper — the one mutant category AGENTS.md records as an
+    /// acceptable survivor — and everything that can be wrong about
+    /// *what* it says is reachable from a unit test.
     ///
-    /// # Errors
-    ///
-    /// Returns an error when the paths differ.
-    pub(crate) fn ensure_device_is(&self, expected: &Path) -> Result<()> {
-        if self.dev_path != expected {
-            bail!(
-                "internal consistency check failed: the exclusive claim is held on {} \
-                 but the phase was given a target describing {}. Refusing to act on a \
-                 mismatched device.",
-                self.dev_path.display(),
-                expected.display()
-            );
+    /// Before this split `replace drop with ()` survived: no non-root
+    /// test observed the notice, and the root-gated one that does runs
+    /// behind `--ignored`, which `cargo mutants` does not execute.
+    fn fatal_notice(&self) -> Option<String> {
+        if !self.would_warn_on_drop() {
+            return None;
         }
-        Ok(())
+        Some(format!(
+            "\n\u{26A0}  FATAL: flash interrupted while {} was {}. \
+             The device is in an inconsistent state. DO NOT REMOVE IT. \
+             Re-run imi to recover.",
+            self.dev_path.display(),
+            self.current_phase().interrupted_verb()
+        ))
     }
 
     /// Raw fd of the held device.
@@ -274,45 +302,141 @@ impl FlashGuard {
                   be called twice on the same guard"
     )]
     pub(crate) fn into_file(mut self) -> File {
-        self.disarm();
+        self.clear_phase();
         self.file.take().expect("FlashGuard::into_file called twice")
+    }
+}
+
+/// A [`FlashGuard`] whose destructive window is open.
+///
+/// Phase 3 produces one by consuming a disarmed guard, and only this type
+/// exposes the operations that belong inside that window. Phases 4 and 5
+/// take `&mut ArmedGuard`, so reaching them without Phase 3 is a compile
+/// error rather than a check someone has to remember to write.
+///
+/// That is not hypothetical. Phase 4 carried a runtime check for exactly
+/// this and Phase 5 did not, for 116 commits, through a file-by-file
+/// review that read both files. Nothing caught it — not clippy, not the
+/// tests, not `cargo mutants`, because there was nothing to mutate.
+///
+/// The wrapper holds an `Option` rather than the guard directly so
+/// `disarm` can take the inner value out without
+/// `unsafe`. `ManuallyDrop::take` is the alternative and needs an unsafe
+/// block; adding one to a crate that audits every unsafe site, in order
+/// to delete a `debug_assert`, is the wrong trade. `FlashGuard::into_file`
+/// already uses the same `Option` for the same reason.
+///
+/// There is deliberately no `Drop` impl here. Dropping an `ArmedGuard`
+/// drops the `FlashGuard` inside it, whose own `Drop` prints the FATAL
+/// notice — so the warning behaviour is defined in exactly one place.
+#[derive(Debug)]
+#[must_use = "dropping an ArmedGuard prints the FATAL notice — a guard armed and \
+              immediately discarded reports an untouched device as inconsistent. \
+              Bind it, or call `disarm()` if the window is over."]
+pub struct ArmedGuard {
+    /// `None` only after `disarm` has taken it, at which point the shell
+    /// is about to be dropped and has nothing left to warn about.
+    inner: Option<FlashGuard>,
+}
+
+impl ArmedGuard {
+    /// The guard inside.
+    #[expect(
+        clippy::expect_used,
+        reason = "unreachable: disarm takes self by value, so no &self method \
+                  can run after the Option is emptied"
+    )]
+    fn guard(&self) -> &FlashGuard {
+        self.inner.as_ref().expect("ArmedGuard used after disarm")
+    }
+
+    /// Advance to a later armed phase, changing the verb in the notice.
+    ///
+    /// No check is needed and none is possible: holding this type *is*
+    /// the proof that the guard is armed.
+    pub(crate) fn set_phase(&self, phase: ArmedPhase) {
+        self.guard().advance_phase(phase);
+    }
+
+    /// Close the destructive window, yielding the disarmed guard.
+    ///
+    /// Consuming `self` is what makes this a one-way door: there is no
+    /// second call, and no way to keep using the armed operations
+    /// afterwards.
+    #[expect(
+        clippy::expect_used,
+        reason = "unreachable: takes self by value, so the Option is full"
+    )]
+    pub(crate) fn disarm(mut self) -> FlashGuard {
+        let guard = self.inner.take().expect("ArmedGuard::disarm called twice");
+        guard.clear_phase();
+        guard
+    }
+
+    /// The claimed device's open file, for the phases that write to it.
+    pub(crate) fn file(&self) -> &File {
+        self.guard().file()
+    }
+
+    /// The claimed descriptor, for the ioctl wrappers.
+    pub(crate) fn as_raw_fd(&self) -> RawFd {
+        self.guard().as_raw_fd()
+    }
+
+    /// The notice this guard would print if dropped now.
+    ///
+    /// Always `Some` — holding an `ArmedGuard` is what makes it so. Here
+    /// for the tests that assert the wording, which would otherwise have
+    /// to reach through the private inner accessor and around the type
+    /// boundary this split exists to draw.
+    #[cfg(test)]
+    /// The notice the guard inside would print if dropped now.
+    ///
+    /// Exists for `guard.rs`'s own tests: `Drop` lives on `FlashGuard`
+    /// and calls its `fatal_notice` directly, so this delegation has no
+    /// production caller. Kept private for that reason — it is a window
+    /// into the wrapper for the test that asserts the notice tracks the
+    /// armed phase, not part of the crate's surface.
+    fn fatal_notice(&self) -> Option<String> {
+        self.guard().fatal_notice()
+    }
+
+    /// Which armed phase the guard is in.
+    #[must_use]
+    pub fn current_phase(&self) -> GuardPhase {
+        self.guard().current_phase()
     }
 }
 
 impl Drop for FlashGuard {
     fn drop(&mut self) {
-        let phase = self.current_phase();
-        if self.would_warn_on_drop() {
-            // Written through `writeln!` rather than `eprintln!`, and
-            // the result deliberately discarded.
+        if let Some(notice) = self.fatal_notice() {
+            // `writeln!` rather than `eprintln!`, and the result
+            // deliberately discarded.
             //
             // `eprintln!` panics if the write fails — a closed or full
             // stderr, an EPIPE from a dead `less`. This runs from `Drop`,
             // and the case it exists for is unwinding, where a second
-            // panic aborts the process immediately. The abort would skip
+            // panic aborts the process immediately. That abort would skip
             // this very notice and every remaining destructor, turning
             // "your device is half-written" into a bare `SIGABRT`.
+            // Reproduced at exit 134 during this file's code review, by
+            // piping stderr to a reader that exits.
             //
             // If stderr is gone the operator cannot be told regardless;
             // what matters is that the attempt cannot make things worse.
             let mut err = io::stderr().lock();
-            let _notice = writeln!(
-                err,
-                "\n\u{26A0}  FATAL: flash interrupted while {} was {}. \
-                 The device is in an inconsistent state. DO NOT REMOVE IT. \
-                 Re-run imi to recover.",
-                self.dev_path.display(),
-                phase.interrupted_verb()
-            );
+            let _notice = writeln!(err, "{notice}");
             let _flushed = err.flush();
         }
-        // `self.file` (if still `Some`) drops here, releasing the O_EXCL claim.
+        // `self.file` (if still `Some`) drops here, releasing the claim.
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::testing::{ArmedForTest, TempPath};
 
     /// Each phase must map to a distinct, descriptive verb so the FATAL
     /// warning honestly describes what was in flight at unwind time. A
@@ -360,50 +484,88 @@ mod tests {
         assert_eq!(GuardPhase::from_u8(255), GuardPhase::Writing);
     }
 
-    /// The guard must accept its own device and refuse any other. This
-    /// is what stops a caller of the public per-phase API from pairing a
-    /// claim on one device with a `Target` describing another.
+    /// The FATAL notice: whether it fires, and what it says.
+    ///
+    /// `Drop` cannot be tested directly without a process that can
+    /// observe stderr, so the decision and the wording live in
+    /// `fatal_notice` and are asserted here. Both directions, because a
+    /// `fatal_notice` that always returned `None` would pass a
+    /// silence-only test while leaving a half-written device unannounced.
     #[test]
-    fn ensure_device_is_accepts_own_path_and_rejects_others() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("imi-guard-match-{}", std::process::id()));
-        let file = File::create(&path).unwrap();
-        let guard = FlashGuard::new(file, path.clone());
+    fn fatal_notice_fires_only_when_armed_and_names_the_device_and_phase() {
+        let path = TempPath::new("guard-notice");
+        let file = File::create(&*path).unwrap();
+        let guard = FlashGuard::new(file, path.to_path_buf());
 
-        guard.ensure_device_is(&path).expect("its own path must be accepted");
+        assert!(guard.fatal_notice().is_none(), "a disarmed guard must say nothing");
 
-        let other = dir.join("imi-some-other-device");
-        let err = guard.ensure_device_is(&other).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mismatched device"), "{msg}");
-        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        let armed = guard.arm(ArmedPhase::Writing);
+        let notice = armed.fatal_notice().expect("an armed guard must announce itself");
+        assert!(notice.contains("FATAL"), "{notice}");
+        assert!(notice.contains("DO NOT REMOVE IT"), "the operator instruction: {notice}");
+        assert!(
+            notice.contains(&path.display().to_string()),
+            "must name the device, or an operator cannot tell which: {notice}"
+        );
+        assert!(
+            notice.contains(GuardPhase::Writing.interrupted_verb()),
+            "must name what was interrupted: {notice}"
+        );
 
-        guard.disarm();
-        std::fs::remove_file(&path).unwrap();
+        // The verb tracks the phase, so the notice is not a fixed string.
+        armed.set_phase(ArmedPhase::Verifying);
+        let later = armed.fatal_notice().expect("still armed");
+        assert!(later.contains(GuardPhase::Verifying.interrupted_verb()), "{later}");
+        assert_ne!(notice, later, "the verb must change with the phase");
+
+        // And silence returns on disarm.
+        let disarmed = armed.disarm();
+        assert!(disarmed.fatal_notice().is_none(), "a disarmed guard must fall silent");
     }
 
-    /// The `arm`/`set_phase`/`disarm` state machine is what makes the FATAL
-    /// notice correct. Each transition is asserted directly because the
-    /// notice itself goes to stderr from `Drop`, which no in-process
-    /// test can observe — without these, all three methods could be
-    /// no-ops and the suite would not notice.
+    /// Both guards must hand out the descriptor they were built from.
+    ///
+    /// `as_raw_fd` is one line on each type and looked untestable without
+    /// hardware: the way a wrong descriptor *manifests* is an ioctl
+    /// failing, and every ioctl here needs a real device. But the way it
+    /// is *wrong* is simpler than that — the function promises "this
+    /// guard's descriptor", and that is checkable against the `File` the
+    /// guard was constructed from, with no ioctl at all.
+    ///
+    /// Both mutants — `replace as_raw_fd with Default::default()`, which
+    /// yields fd 0, stdin — survived until this existed. Phase 6 would
+    /// have issued `BLKRRPART` against stdin.
+    #[test]
+    fn as_raw_fd_returns_the_guards_own_descriptor() {
+        let path = TempPath::new("rawfd");
+        let file = File::create(&*path).unwrap();
+        let expected = file.as_raw_fd();
+        assert!(expected > 2, "precondition: a real file, not a std stream: {expected}");
+
+        let guard = FlashGuard::new(file, path.to_path_buf());
+        assert_eq!(guard.as_raw_fd(), expected, "FlashGuard must hand out its own fd");
+
+        // And the wrapper must delegate rather than invent one.
+        let armed = ArmedForTest::new(guard.arm(ArmedPhase::Writing));
+        assert_eq!(armed.as_raw_fd(), expected, "ArmedGuard must hand out the same fd");
+    }
+
     #[test]
     fn guard_state_machine_tracks_every_transition() {
-        let path = std::env::temp_dir().join(format!("imi-sm-{}", std::process::id()));
-        let file = File::create(&path).unwrap();
-        let guard = FlashGuard::new(file, path.clone());
+        let path = TempPath::new("sm");
+        let file = File::create(&*path).unwrap();
+        let guard = FlashGuard::new(file, path.to_path_buf());
 
         assert_eq!(guard.current_phase(), GuardPhase::Disarmed);
         assert!(!guard.would_warn_on_drop(), "a fresh guard must be silent on drop");
 
-        guard.arm(ArmedPhase::WipingSignatures);
+        let guard = guard.arm(ArmedPhase::WipingSignatures);
         assert_eq!(guard.current_phase(), GuardPhase::WipingSignatures);
-        assert!(guard.would_warn_on_drop(), "an armed guard must warn on drop");
+        // Armed: holding an `ArmedGuard` is that assertion.
 
         for phase in [ArmedPhase::Writing, ArmedPhase::Cooldown, ArmedPhase::Verifying] {
             guard.set_phase(phase);
             assert_eq!(guard.current_phase(), GuardPhase::from(phase));
-            assert!(guard.would_warn_on_drop(), "{phase:?} must still warn on drop");
         }
 
         // Every armed phase maps to a distinct, non-Disarmed GuardPhase:
@@ -418,10 +580,8 @@ mod tests {
             assert_ne!(GuardPhase::from(phase), GuardPhase::Disarmed, "{phase:?}");
         }
 
-        guard.disarm();
+        let guard = guard.disarm();
         assert_eq!(guard.current_phase(), GuardPhase::Disarmed);
         assert!(!guard.would_warn_on_drop(), "a disarmed guard must be silent again");
-
-        std::fs::remove_file(&path).unwrap();
     }
 }
