@@ -912,7 +912,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(
+        miri,
+        ignore = "writes through the direct_io O_DIRECT path, an open flag Miri's shim rejects"
+    )]
     fn process_chunk_tail_writes_partial_and_finishes() {
         let (guard, p) = tempfile_guard("tail");
         let mut buf = AlignedBuf::new().unwrap();
@@ -952,7 +955,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // miri ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn flash_finalize_clears_o_direct_and_syncs() {
         let (guard, dev_p) = tempfile_guard("finalize");
 
@@ -1064,7 +1070,10 @@ mod tests {
     /// the error with the serial arm's context string and writes
     /// nothing to the device.
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(
+        miri,
+        ignore = "writes through the direct_io O_DIRECT path, an open flag Miri's shim rejects"
+    )]
     fn pipelined_propagates_worker_error_with_context() {
         // 100 KiB of zeros, gzipped, then truncated mid-deflate-stream.
         let img_p = std::env::temp_dir().join(format!("imi-trunc-{}.gz", std::process::id()));
@@ -1107,7 +1116,10 @@ mod tests {
     /// armed guard's Drop would fire during this unwind. Nothing may
     /// have been written.
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(
+        miri,
+        ignore = "writes through the direct_io O_DIRECT path, an open flag Miri's shim rejects"
+    )]
     fn pipelined_resumes_worker_panic_on_main_thread() {
         let (mut guard, dev_p) = tempfile_guard("wpanic");
         let cancel = AtomicBool::new(false);
@@ -1123,7 +1135,10 @@ mod tests {
     /// chunks) at 4 MiB/s must take at least ~2 chunk-periods; assert a
     /// loose lower bound (no upper bound — CI boxes stall).
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(
+        miri,
+        ignore = "writes through the direct_io O_DIRECT path, an open flag Miri's shim rejects"
+    )]
     fn pipelined_throttle_enforces_rate_floor() {
         let img_p = TempPath::new("thr");
         let gz = {
@@ -1162,7 +1177,10 @@ mod tests {
     /// `flash_pipelined`, must produce identical outcomes and identical
     /// device bytes — the structural guard against arm drift.
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(
+        miri,
+        ignore = "writes through the direct_io O_DIRECT path, an open flag Miri's shim rejects"
+    )]
     fn arms_produce_identical_bytes_for_identical_input() {
         let mut pattern = vec![0xC3_u8; 5 * 1024 * 1024];
         pattern.extend_from_slice(&[0x3C; 137]);
@@ -1211,7 +1229,10 @@ mod tests {
     /// `process_chunk` untouched. `/dev/full` returns ENOSPC on every
     /// write, giving the real error without mocks (approach (b)).
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(
+        miri,
+        ignore = "writes through the direct_io O_DIRECT path, an open flag Miri's shim rejects"
+    )]
     fn process_chunk_surfaces_enospc_diagnostic() {
         let f = std::fs::OpenOptions::new().write(true).read(true).open("/dev/full").unwrap();
         let guard = ArmedForTest::new(
@@ -1240,7 +1261,10 @@ mod tests {
     /// A read-only file gives `EBADF` from `pwrite`, which is emphatically
     /// not a capacity error.
     #[test]
-    #[cfg_attr(miri, ignore)] // real file I/O; Miri cannot execute it
+    #[cfg_attr(
+        miri,
+        ignore = "writes through the direct_io O_DIRECT path, an open flag Miri's shim rejects"
+    )]
     fn a_non_capacity_write_error_keeps_its_own_diagnostic() {
         let path = TempPath::new("wperm");
         std::fs::write(&path, [0_u8; 64]).unwrap();

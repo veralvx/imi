@@ -487,7 +487,11 @@ mod tests {
     }
 
     #[test]
-    //#[cfg_attr(miri, ignore)] // MultiBzDecoder is C FFI (libbz2), like the xz/zst siblings
+    // Deliberately NOT gated under Miri, and neither is the gzip arm:
+    // this crate's bzip2 resolves to the pure-Rust libbz2-rs-sys backend
+    // (see Cargo.lock — no bzip2-sys), and flate2 to miniz_oxide, so
+    // Miri exercises the multi-member decode logic through two of the
+    // four formats. Only xz (liblzma) and zstd (libzstd) are C here.
     fn multi_member_bz2_decodes_in_full() {
         const MULTI_BZ2: &[u8] = &[
             0x42, 0x5A, 0x68, 0x39, 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, 0x46, 0xD1, 0x48, 0x27,
@@ -505,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(miri, ignore = "liblzma is a C library; Miri cannot execute foreign functions")]
     fn multi_stream_xz_decodes_in_full() {
         const MULTI_XZ: &[u8] = &[
             0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00, 0x04, 0xE6, 0xD6, 0xB4, 0x46, 0x02, 0x00,
@@ -526,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // unsupported operation
+    #[cfg_attr(miri, ignore = "libzstd is a C library; Miri cannot execute foreign functions")]
     fn multi_member_zst_decodes_in_full() {
         const MULTI_ZST: &[u8] = &[
             0x28, 0xB5, 0x2F, 0xFD, 0x24, 0x3F, 0xDD, 0x00, 0x00, 0xA8, 0x66, 0x69, 0x72, 0x73,

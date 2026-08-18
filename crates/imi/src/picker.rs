@@ -157,6 +157,10 @@ mod tests {
 
     /// The live list renders one line per candidate, whatever the host has.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "enumerates the host's /sys and /proc; /proc bypasses Miri's file model"
+    )]
     fn live_list_renders_one_line_each() {
         let list = imi_core::candidate_devices().expect("enumeration succeeds on Linux");
         assert_eq!(super::render_lines(&list).len(), list.len());

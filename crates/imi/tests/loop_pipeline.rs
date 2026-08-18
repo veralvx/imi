@@ -274,7 +274,10 @@ fn run_imi(image: &std::path::Path, device: &str) -> (bool, String) {
 ///
 /// Needs no root: the refusal happens before the pipeline starts.
 #[test]
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(
+    miri,
+    ignore = "spawns the compiled binary; Miri interprets one program and cannot exec another"
+)]
 fn omitting_dev_without_a_terminal_refuses_with_guidance() {
     let img = TempImage::write("nodev", &[0xAB; 4096]);
     let out = Command::new(env!("CARGO_BIN_EXE_imi"))
@@ -313,7 +316,10 @@ fn omitting_dev_without_a_terminal_refuses_with_guidance() {
 /// None of these needs root — they all fail before the pipeline starts —
 /// so this runs in the ordinary suite rather than behind `--ignored`.
 #[test]
-#[cfg_attr(miri, ignore)] // miri unsupported operation
+#[cfg_attr(
+    miri,
+    ignore = "spawns the compiled binary; Miri interprets one program and cannot exec another"
+)]
 fn exit_codes_distinguish_usage_errors_from_run_failures() {
     let code = |args: &[&str]| -> i32 {
         Command::new(env!("CARGO_BIN_EXE_imi"))
@@ -367,7 +373,10 @@ fn exit_codes_distinguish_usage_errors_from_run_failures() {
 /// covered: no guard, and a guard that was armed and correctly stood
 /// down.
 #[test]
-#[cfg_attr(miri, ignore)] // miri unsupported operation
+#[cfg_attr(
+    miri,
+    ignore = "spawns the compiled binary; Miri interprets one program and cannot exec another"
+)]
 fn a_refusal_before_writing_prints_no_fatal_notice() {
     for args in [
         vec!["-i", "/nonexistent-image.img", "-d", "/dev/null", "--yes"],

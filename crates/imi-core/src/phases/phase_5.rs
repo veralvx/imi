@@ -867,7 +867,10 @@ mod tests {
     /// non-uniform payload means a wrong offset would compare unequal
     /// rather than accidentally matching.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn verify_serial_walks_every_chunk_of_a_multi_chunk_device() {
         let len = 2 * BUF_SIZE + 4096;
         let payload: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
@@ -893,7 +896,10 @@ mod tests {
     /// Happy path end to end: device contents equal the decompressed
     /// image (one full chunk + tail) — pipelined verify returns Ok.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn pipelined_verify_accepts_matching_device() {
         let mut payload = vec![0x2E_u8; BUF_SIZE];
         payload.extend_from_slice(&[0xE2; 137]);
@@ -907,7 +913,10 @@ mod tests {
     /// A single corrupted device byte in the SECOND chunk is reported at
     /// its absolute offset by the pipelined arm.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn pipelined_verify_reports_mismatch_offset() {
         let mut payload = vec![0x55_u8; BUF_SIZE + 4096];
         let (reader, img_p) = gzip_reader("mm", &payload);
@@ -934,7 +943,10 @@ mod tests {
     /// Arm parity on the failure path: serial and pipelined report the
     /// SAME mismatch diagnostic for the same corrupted device.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn verify_arms_report_identical_mismatch() {
         let mut payload = vec![0x77_u8; 2 * BUF_SIZE];
         let (reader_p, img_p) = gzip_reader("par", &payload);
@@ -985,7 +997,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn pipelined_verify_resumes_worker_panic_on_main_thread() {
         let (mut guard, _dev_p) = tempfile_guard("panic", &vec![0_u8; 8192]);
         let cancel = AtomicBool::new(false);
@@ -1006,7 +1021,10 @@ mod tests {
     /// A truncated image stream surfaces the worker's fill error with
     /// the serial arm's context string.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn pipelined_verify_propagates_worker_error_with_context() {
         let payload = vec![0x11_u8; 200 * 1024];
         let (_full_reader, img_p) = gzip_reader("werr", &payload);
@@ -1065,7 +1083,10 @@ mod tests {
     /// truncation (`fill_exact`'s `UnexpectedEof`, with the stream context)
     /// — never as a content mismatch.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn pipelined_verify_classifies_truncation_not_mismatch() {
         let payload = vec![0x44_u8; 100 * 1024];
         let (reader, img_p) = gzip_reader("short", &payload);

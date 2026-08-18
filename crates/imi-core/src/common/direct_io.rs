@@ -55,7 +55,7 @@ mod tests {
     /// and silently defeats the point of the aligned buffer rather than
     /// failing.
     #[test]
-    #[cfg_attr(miri, ignore)]
+    #[cfg_attr(miri, ignore = "opens with O_DIRECT, an open flag Miri's shim does not support")]
     fn toggling_moves_only_the_o_direct_bit() {
         let path = TempPath::new("odirect");
         let f = std::fs::OpenOptions::new()

@@ -79,6 +79,10 @@ mod tests {
     /// catches the first half, but only behind `--ignored`; the events
     /// are observable here.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "run issues a real BLKRRPART ioctl, a foreign function Miri cannot execute"
+    )]
     fn kernel_sync_disarms_and_closes_its_phase() {
         let path = TempPath::new("p6");
         let file = File::create(&*path).expect("temp file");

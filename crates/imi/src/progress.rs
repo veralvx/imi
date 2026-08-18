@@ -170,7 +170,10 @@ mod tests {
 
     /// Raw input takes the percent/total bar.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn make_progress_bar_parses_the_unified_template() {
         let pb = make_progress_bar(Some(1024));
         pb.finish_and_clear();
@@ -181,7 +184,10 @@ mod tests {
     /// the case that reaches it: its decompressed length is not known
     /// until the write finishes.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn make_progress_bar_parses_the_spinner_template() {
         let pb = make_progress_bar(None);
         assert_eq!(pb.length(), None, "an unknown total must leave the bar unbounded");
@@ -191,7 +197,10 @@ mod tests {
     /// Phase 5b's bar shares the unified template but builds it in its
     /// own constructor, so it gets its own call.
     #[test]
-    #[cfg_attr(miri, ignore)] // MIRI ICE
+    #[cfg_attr(
+        miri,
+        ignore = "current nightly Miri ICEs while interpreting this test (upstream Miri bug, user-observed); re-enable when fixed"
+    )]
     fn make_verify_pb_parses_its_template() {
         let pb = make_verify_pb(4096);
         assert_eq!(pb.length(), Some(4096), "the verify bar is always bounded");

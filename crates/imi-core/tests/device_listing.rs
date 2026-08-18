@@ -23,6 +23,7 @@ use imi_core::candidate_devices;
 
 /// Every returned candidate is structurally sound on the real tree.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn live_candidates_are_structurally_sound() {
     let list = candidate_devices().expect("enumeration must succeed on a Linux host");
     for c in &list {
@@ -61,6 +62,7 @@ fn live_candidates_are_structurally_sound() {
 /// the strongest observable consequence is asserted below for every
 /// host shape.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_candidate_carries_the_root_filesystem() {
     let list = candidate_devices().expect("enumeration must succeed");
     let root_dev = std::fs::read_to_string("/proc/self/mountinfo").ok().and_then(|t| {
