@@ -159,6 +159,20 @@
 //! this crate selects a device, and every candidate still passes
 //! through the full Phase 0–2 gauntlet after a human picks it.
 //!
+//! # Tuning the cooldown
+//!
+//! Phase 5a waits for the device's own controller to finish draining its
+//! write cache before Phase 5b starts reading the device back.
+//! [`Config::cooldown_secs`] overrides [`DEFAULT_COOLDOWN_SECS`], within
+//! [`MAX_COOLDOWN_SECS`]; [`validate_cooldown_secs`] holds the bounds and
+//! every phase calls it rather than trusting the field, because the
+//! phases are public and the field is freely assignable.
+//!
+//! Zero is not how you skip it. A zero cooldown is refused and points at
+//! [`Config::skip_cooldown`], so that omitting the wait stays a separate,
+//! explicit act — the one that carries the corruption warning. Shortening
+//! and skipping are different decisions and the API keeps them apart.
+//!
 //! # Privileges and side effects
 //!
 //! Every phase from 1 onward requires `root`. Phases 3 onward are
@@ -199,7 +213,7 @@ pub use crate::common::identity::DeviceIdentity;
 pub use crate::common::image::Compression;
 pub use crate::common::mount::TargetDevts;
 pub use crate::common::session::{ArmedSession, Session};
-pub use crate::config::Config;
+pub use crate::config::{Config, DEFAULT_COOLDOWN_SECS, MAX_COOLDOWN_SECS, validate_cooldown_secs};
 pub use crate::error::{DeviceState, Error, ErrorKind};
 pub use crate::events::{Events, Phase, PhaseOutcome, Summary};
 

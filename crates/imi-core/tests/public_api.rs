@@ -119,6 +119,36 @@ fn reads_every_candidate_accessor(c: &imi_core::CandidateDevice) -> bool {
         && (c.removable() || !c.removable())
 }
 
+/// The cooldown surface a downstream caller depends on.
+///
+/// `validate_cooldown_secs` is called by the `imi` binary's argument
+/// parser, so it is public API in the strict sense: a rename or a
+/// visibility change breaks a consumer this crate cannot see. The two
+/// constants travel with it — a caller resolving `cooldown_secs`
+/// itself needs the default, and a caller building its own UI needs
+/// the bound to state it.
+#[test]
+fn cooldown_configuration_is_pinned() {
+    let _: fn(u64) -> imi_core::Result<u64> = imi_core::validate_cooldown_secs;
+    let _: u64 = imi_core::DEFAULT_COOLDOWN_SECS;
+    let _: u64 = imi_core::MAX_COOLDOWN_SECS;
+
+    // The field is assignable by name on a `#[non_exhaustive]` struct
+    // built through `Config::new`, which is the documented pattern.
+    let mut config = nonexistent_config();
+    config.cooldown_secs = Some(30);
+    assert_eq!(config.cooldown_secs, Some(30));
+
+    // The default is in bounds, checked through the public surface
+    // rather than by restating either number.
+    assert_eq!(
+        imi_core::validate_cooldown_secs(imi_core::DEFAULT_COOLDOWN_SECS).unwrap(),
+        imi_core::DEFAULT_COOLDOWN_SECS
+    );
+    imi_core::validate_cooldown_secs(0).unwrap_err();
+    imi_core::validate_cooldown_secs(imi_core::MAX_COOLDOWN_SECS + 1).unwrap_err();
+}
+
 /// The enumeration entry point keeps its shape.
 #[test]
 fn candidate_enumeration_is_pinned() {

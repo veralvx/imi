@@ -19,12 +19,21 @@
 //! Phase 5a — the hardware cooldown that must precede this compare —
 //! is `cooldown` below; [`run`] sequences the two.
 //!
-//! Why 10 seconds? `sync`/`fdatasync` only guarantee the kernel has handed
-//! bytes to the device. USB mass-storage bridges typically do not translate
-//! `SYNCHRONIZE CACHE` (SCSI opcode 0x35) meaningfully, so the ioctl
-//! returns success without flushing anything. A wall-clock wait is the
-//! most reliable path we have; 10 s matches the bash original and clears
-//! the controller drain for every device we have tested.
+//! Why a wall-clock wait at all? `sync`/`fdatasync` only guarantee the
+//! kernel has handed bytes to the device. USB mass-storage bridges
+//! typically do not translate `SYNCHRONIZE CACHE` (SCSI opcode 0x35)
+//! meaningfully, so the ioctl returns success without flushing anything.
+//! Waiting is the most reliable path we have.
+//!
+//! Why 20 seconds by default? The bash original used 10, tuned
+//! empirically against roughly thirty USB sticks. That measurement is a
+//! floor this default respects rather than replaces — a longer wait
+//! cannot fail where a shorter one succeeded — and the extra ten seconds
+//! cover the tail of the drain distribution the original sample cannot
+//! speak to. The asymmetry decides it: too short risks corruption on
+//! unplug or a false verification failure, too long costs seconds on an
+//! operation that already took minutes. `--cooldown-secs` overrides it;
+//! see `Config::cooldown_secs`.
 
 use std::io::Read;
 use std::os::unix::fs::FileExt;
@@ -44,7 +53,7 @@ use crate::common::image::{Compression, ImageReader};
 use crate::common::ioctl;
 use crate::common::session::ArmedSession;
 use crate::common::throttle::chunk_target_nanos;
-use crate::config::Config;
+use crate::config::{Config, validate_cooldown_secs};
 use crate::error::{Cancelled, VerificationMismatch};
 use crate::error::{Context as _, bail, err};
 use crate::events::{Events, Phase as UiPhase, PhaseOutcome};
@@ -126,7 +135,8 @@ fn run_inner<E: Events + ?Sized>(
         events.phase_skipped(UiPhase::Cooldown);
     } else {
         session.set_phase(ArmedPhase::Cooldown);
-        cooldown(10, cancel, events).context("Phase 5a: hardware cooldown")?;
+        let secs = validate_cooldown_secs(config.resolved_cooldown_secs())?;
+        cooldown(secs, cancel, events).context("Phase 5a: hardware cooldown")?;
     }
 
     // Phase 5b — byte-for-byte verification. Skipped on --skip-verification.
@@ -1144,5 +1154,15 @@ mod tests {
         assert_eq!(rec.started, vec![UiPhase::Cooldown]);
         assert_eq!(rec.finished, vec![(UiPhase::Cooldown, PhaseOutcome::Failed)]);
         assert!(rec.progress.is_empty(), "no tick should fire before the flag is seen");
+
+        // Cancellation is a property of the loop, not of the duration:
+        // the flag is read once per second whatever the total. Pinning a
+        // second, larger value stops a future change from making
+        // responsiveness depend on how long the caller asked to wait.
+        let mut long = Recorder::default();
+        let long_err = cooldown(crate::MAX_COOLDOWN_SECS, &AtomicBool::new(true), &mut long)
+            .expect_err("a set flag must abort at any duration");
+        assert_eq!(long_err.kind(), crate::ErrorKind::Cancelled, "{long_err}");
+        assert!(long.progress.is_empty(), "no tick at a long duration either");
     }
 }

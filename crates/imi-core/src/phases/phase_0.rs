@@ -29,7 +29,7 @@ use crate::common::context::Target;
 use crate::common::geometry::WIPE_REGION;
 use crate::common::identity::DeviceIdentity;
 use crate::common::{image, ioctl, mount, sysfs};
-use crate::config::Config;
+use crate::config::{Config, validate_cooldown_secs};
 use crate::error::{Context as _, bail};
 use crate::events::{Events, Phase as UiPhase, PhaseOutcome, Summary};
 
@@ -60,6 +60,21 @@ pub fn run<E: Events + ?Sized>(config: &Config, events: &mut E) -> Result<Target
 /// that maps the device state and emits `phase_finished`.
 fn run_inner<E: Events + ?Sized>(config: &Config, events: &mut E) -> Result<Target> {
     events.phase_started(UiPhase::Preflight);
+
+    // Bounds-check the cooldown before anything is opened or armed.
+    // Phase 5 checks it again where it is consumed; this call exists so
+    // a library caller who assigned the field by hand is refused now,
+    // rather than after the device has been written. From the CLI the
+    // parser has already rejected the same values, which makes this
+    // defence in depth there and the only guard for a direct consumer.
+    //
+    // It sits *after* `phase_started` deliberately: `run` emits
+    // `phase_finished` unconditionally, so a bail before the start event
+    // would hand a front end a finished phase that never started. It
+    // sits *before* the root check because a caller does not need
+    // privileges to be told their configuration is wrong.
+    validate_cooldown_secs(config.resolved_cooldown_secs())?;
+
     phase0_root_check()?;
 
     let img_canon = std::fs::canonicalize(&config.img)
@@ -599,6 +614,7 @@ fn query_dev_geometry_readonly(path: &Path) -> Result<(u64, bool)> {
 
 #[cfg(test)]
 mod tests {
+
     use std::path::{Path, PathBuf};
 
     use crate::common::testing::TempPath;
@@ -608,6 +624,63 @@ mod tests {
         ensure_distinct_paths, ensure_image_fits, ensure_image_is_regular_file,
         ensure_physical_or_loop, file_type_name, is_same_file,
     };
+    // Re-exported through the parent's own file-level imports.
+    use super::{PhaseOutcome, UiPhase};
+
+    /// An out-of-range cooldown is refused by Phase 0, before anything is
+    /// opened — and the phase's event pair stays well-formed.
+    ///
+    /// The pairing assertion is not incidental. `run` emits
+    /// `phase_finished` unconditionally, so a check placed before
+    /// `phase_started` produces a `finished` with no `started`. An earlier
+    /// draft of this very function did exactly that; nothing else in the
+    /// suite would have caught it.
+    #[test]
+    fn an_out_of_range_cooldown_is_refused_before_any_device_work() {
+        let mut config = Config::new(
+            PathBuf::from("/nonexistent/imi-image.iso"),
+            PathBuf::from("/nonexistent/imi-device"),
+        );
+        config.yes = true;
+        config.cooldown_secs = Some(crate::MAX_COOLDOWN_SECS + 1);
+
+        let mut rec = crate::common::testing::Recorder::default();
+        let err =
+            super::run(&config, &mut rec).expect_err("an out-of-range cooldown must be refused");
+
+        assert!(err.to_string().contains("cooldown"), "the diagnosis must name it: {err}");
+        assert_eq!(
+            err.device_state(),
+            crate::DeviceState::Untouched,
+            "nothing was opened, so nothing was touched"
+        );
+        assert_eq!(rec.started, vec![UiPhase::Preflight]);
+        assert_eq!(rec.finished, vec![(UiPhase::Preflight, PhaseOutcome::Failed)]);
+    }
+
+    /// The refusal stands even when the cooldown will never run.
+    ///
+    /// `skip_cooldown` makes the value inert for this run, and Phase 5
+    /// will not read it — but Phase 0 checks unconditionally, on purpose.
+    /// An out-of-range cooldown is a bug in the caller's configuration
+    /// whether or not this particular run consumes it, and accepting it
+    /// silently means the same config fails the moment someone flips the
+    /// skip flag off. The CLI cannot even express the pair; this is the
+    /// library path, and it is the only place the choice is observable.
+    #[test]
+    fn a_skipped_cooldown_is_still_bounds_checked() {
+        let mut config = Config::new(
+            PathBuf::from("/nonexistent/imi-image.iso"),
+            PathBuf::from("/nonexistent/imi-device"),
+        );
+        config.yes = true;
+        config.skip_cooldown = true;
+        config.cooldown_secs = Some(0);
+
+        let err = super::run(&config, &mut crate::common::testing::Recorder::default())
+            .expect_err("a contradictory config must be refused, not quietly accepted");
+        assert!(err.to_string().contains("--skip-cooldown"), "{err}");
+    }
 
     /// Regular files pass — the overwhelmingly common case.
     #[test]

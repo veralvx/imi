@@ -61,13 +61,29 @@ pub(crate) struct Cli {
     #[arg(long = "skip-verification")]
     pub(crate) skip_verification: bool,
 
-    /// Skip the 10-second hardware cooldown (Phase 5a). The cooldown lets cheap
+    /// Skip the Phase 5a hardware cooldown entirely (20 s by default; see
+    /// --cooldown-secs to shorten rather than skip it). The cooldown lets cheap
     /// USB-NAND bridge controllers drain their DRAM write cache to flash after
     /// fdatasync returns; skipping it risks silent corruption on unplug for such
     /// devices. Intended for loop devices, automated tests, and high-quality
     /// media whose controllers honor cache flushes.
     #[arg(long = "skip-cooldown")]
     pub(crate) skip_cooldown: bool,
+
+    /// Seconds to wait after the flash for the device controller to drain its write
+    /// cache (Phase 5a). Default 20. Lowering it risks two things: corruption if the
+    /// device is unplugged while its controller is still writing, and — seen more
+    /// often — verification reporting a false failure, because reading at full speed
+    /// during the drain window can brown out a bus-powered bridge. This matters more,
+    /// not less, with --skip-verification: without the verify pass the cooldown is the
+    /// only settling time before unplug. Use --skip-cooldown to omit the wait entirely.
+    #[arg(
+        long = "cooldown-secs",
+        value_name = "SECONDS",
+        conflicts_with = "skip_cooldown",
+        value_parser = parse_cooldown_secs
+    )]
+    pub(crate) cooldown_secs: Option<u64>,
 }
 
 /// Custom `clap` value parser that turns a rate like `500K`, `8M`, `1G`
@@ -119,6 +135,31 @@ pub(crate) fn parse_rate(s: &str) -> Result<u64, String> {
     n.checked_mul(mult).ok_or_else(|| format!("throttle rate '{s}' overflows u64"))
 }
 
+/// Parse and bounds-check `--cooldown-secs`.
+///
+/// The bounds themselves live in [`imi_core::validate_cooldown_secs`], so the
+/// library holds them for every caller; mirroring them here means a typo fails
+/// at argument-parse time, before any device is opened.
+fn parse_cooldown_secs(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    // `30s` is the predictable mistake, because every other numeric flag here
+    // takes a suffix. Left to `u64::from_str` it answers "invalid digit found
+    // in string", which names neither the problem nor the fix.
+    //
+    // The let-chain is not a style choice: as a nested `if` this trips clippy's
+    // `collapsible_if`, which is default-warn and therefore fatal under the
+    // workspace's `-D warnings`.
+    if let Some(stem) = s.strip_suffix(['s', 'S'])
+        && !stem.is_empty()
+        && stem.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(format!("this flag takes plain seconds — write '{stem}', not '{s}'"));
+    }
+    let n: u64 = s.parse().map_err(|e| format!("invalid cooldown seconds '{s}': {e}"))?;
+    imi_core::validate_cooldown_secs(n).map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
 impl Cli {
     /// Project the parsed arguments onto the core's own input type.
     ///
@@ -130,6 +171,7 @@ impl Cli {
         config.throttle = self.throttle;
         config.skip_cooldown = self.skip_cooldown;
         config.skip_verification = self.skip_verification;
+        config.cooldown_secs = self.cooldown_secs;
         config
     }
 }
@@ -321,6 +363,30 @@ mod tests {
         assert_eq!(config.throttle, Some(1024));
         assert!(config.skip_cooldown);
         assert!(config.skip_verification);
+        assert_eq!(
+            config.cooldown_secs, None,
+            "an unset --cooldown-secs must map to None, not to the default"
+        );
+
+        // `--cooldown-secs` cannot join the argv above: it conflicts with
+        // `--skip-cooldown`, which that invocation needs in order to pin
+        // the skip flag's mapping. A second parse covers the other arm —
+        // without it, deleting the `config.cooldown_secs = ...` line in
+        // `to_config` would pass every test in this file.
+        let with_cooldown = Cli::try_parse_from([
+            "imi",
+            "-i",
+            "/tmp/src.iso",
+            "-d",
+            "/dev/loop9",
+            "--yes",
+            "--cooldown-secs",
+            "30",
+        ])
+        .unwrap()
+        .to_config(std::path::PathBuf::from("/dev/test-resolved"));
+        assert_eq!(with_cooldown.cooldown_secs, Some(30));
+        assert!(!with_cooldown.skip_cooldown, "the two must stay independent");
     }
 
     /// `-d` parses into `Some`, and omitting it parses into `None`.
@@ -335,6 +401,87 @@ mod tests {
 
         let without = Cli::try_parse_from(["imi", "-i", "/i"]).unwrap();
         assert_eq!(without.dev, None, "omitting --dev must parse, not error");
+    }
+
+    /// `--cooldown-secs` accepts a plain integer and rejects everything else.
+    ///
+    /// The `-1` case is not a value error: clap reads a leading dash as an
+    /// unknown flag, so `parse_cooldown_secs` never runs. Asserting a parser
+    /// message there would fail for a reason unrelated to this flag.
+    #[test]
+    fn cooldown_secs_parses_and_bounds_check() {
+        for good in ["1", "20", "30", "600"] {
+            let cli = Cli::try_parse_from(["imi", "-i", "/i", "--cooldown-secs", good]).unwrap();
+            assert_eq!(cli.cooldown_secs, Some(good.parse().unwrap()), "{good}");
+        }
+
+        let zero = Cli::try_parse_from(["imi", "-i", "/i", "--cooldown-secs", "0"]).unwrap_err();
+        assert!(
+            zero.to_string().contains("--skip-cooldown"),
+            "refusing zero must name the flag that carries the warning: {zero}"
+        );
+
+        for over in ["601", "10000"] {
+            let err =
+                Cli::try_parse_from(["imi", "-i", "/i", "--cooldown-secs", over]).unwrap_err();
+            // The full phrase, not a bare "600": a message naming a wrong
+            // bound like "6000" would satisfy a substring check.
+            assert!(
+                err.to_string().contains(&format!("maximum of {}s", imi_core::MAX_COOLDOWN_SECS)),
+                "the bound must be named exactly: {err}"
+            );
+        }
+
+        let suffixed =
+            Cli::try_parse_from(["imi", "-i", "/i", "--cooldown-secs", "30s"]).unwrap_err();
+        assert!(
+            suffixed.to_string().contains("plain seconds") && suffixed.to_string().contains("'30'"),
+            "the suffix message must name the fix: {suffixed}"
+        );
+
+        for bad in ["abc", "1.5", ""] {
+            assert!(
+                Cli::try_parse_from(["imi", "-i", "/i", "--cooldown-secs", bad]).is_err(),
+                "{bad:?} must not parse"
+            );
+        }
+
+        let negative =
+            Cli::try_parse_from(["imi", "-i", "/i", "--cooldown-secs", "-1"]).unwrap_err();
+        assert!(
+            negative.to_string().contains("unexpected argument"),
+            "a leading dash is an unknown flag to clap, not a bad value: {negative}"
+        );
+
+        let omitted = Cli::try_parse_from(["imi", "-i", "/i"]).unwrap();
+        assert_eq!(omitted.cooldown_secs, None, "omitting the flag must parse, not error");
+    }
+
+    /// Setting a duration and skipping the wait are contradictory, and clap
+    /// refuses the pair rather than picking a winner.
+    #[test]
+    fn cooldown_secs_conflicts_with_skip_cooldown() {
+        let err =
+            Cli::try_parse_from(["imi", "-i", "/i", "--skip-cooldown", "--cooldown-secs", "30"])
+                .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("--skip-cooldown"), "{text}");
+        assert!(text.contains("--cooldown-secs"), "{text}");
+    }
+
+    /// The help text states the same default the library actually uses.
+    ///
+    /// The number lives in `DEFAULT_COOLDOWN_SECS` and, unavoidably, in a
+    /// doc comment that cannot interpolate it. This is the gate that keeps
+    /// the two from drifting when the default next moves.
+    #[test]
+    fn help_states_the_real_default() {
+        let help = <Cli as clap::CommandFactory>::command().render_long_help().to_string();
+        assert!(
+            help.contains(&format!("Default {}", imi_core::DEFAULT_COOLDOWN_SECS)),
+            "--help must name the real default ({}): {help}",
+            imi_core::DEFAULT_COOLDOWN_SECS
+        );
     }
 
     /// The two skip flags are independent and must not be swapped: each
@@ -366,5 +513,9 @@ mod tests {
         assert!(config.throttle.is_none(), "throttle must default to unlimited");
         assert!(!config.skip_cooldown, "cooldown must run by default");
         assert!(!config.skip_verification, "verification must run by default");
+        assert_eq!(
+            config.cooldown_secs, None,
+            "an omitted --cooldown-secs must defer to the library default"
+        );
     }
 }

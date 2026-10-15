@@ -221,7 +221,7 @@ fn raw_image(tag: &str, len: usize) -> PathBuf {
     path
 }
 
-/// A config that never blocks on a TTY and skips the 10 s cooldown, so
+/// A config that never blocks on a TTY and skips the Phase 5a cooldown, so
 /// the test measures the pipeline rather than the wait.
 fn config_for(image: &Path, device: &str) -> imi_core::Config {
     let mut config = imi_core::Config::new(image.to_path_buf(), PathBuf::from(device));

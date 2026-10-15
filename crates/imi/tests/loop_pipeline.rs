@@ -33,6 +33,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 // This test drives the pipeline through `CARGO_BIN_EXE_imi` as a black
 // box, so it names none of the `imi` package's dependencies. They are
@@ -50,7 +51,8 @@ use indicatif as _;
 
 /// Size of every loop backing file: comfortably above the
 /// `2 * WIPE_REGION` floor and small enough to flash in well under a
-/// second (the 10-second cooldown dominates each test's wall time).
+/// second. (`run_imi` passes `--skip-cooldown`, so the Phase 5a wait no
+/// longer dominates; see the note there.)
 const BACKING_LEN: usize = 8 * 1024 * 1024;
 
 /// A loop device attached for the duration of one test; detached on drop.
@@ -254,7 +256,14 @@ fn run_imi(image: &std::path::Path, device: &str) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_imi"))
         .args(["-i"])
         .arg(image)
-        .args(["-d", device, "--yes"])
+        // `--skip-cooldown` is not a shortcut here, it is the flag's
+        // documented purpose: "intended for loop devices, automated
+        // tests, and high-quality media". These are loop devices in an
+        // automated test, and the wait is pure sleep — four call sites
+        // times the default would add well over a minute to the root
+        // suite while pinning nothing. A test that wants to observe the
+        // cooldown phase should spawn without this flag deliberately.
+        .args(["-d", device, "--yes", "--skip-cooldown"])
         .output()
         .expect("spawn imi");
     let text =
@@ -303,6 +312,52 @@ fn omitting_dev_without_a_terminal_refuses_with_guidance() {
     );
     assert!(text.contains("--dev"), "and the fix must be pointed at: {text}");
     assert!(!text.contains("FATAL"), "nothing armed, so nothing may warn: {text}");
+}
+
+/// `--cooldown-secs` reaches the sleep, and the run counts down from it.
+///
+/// The gap this closes was found by mutation: nothing else observes what
+/// Phase 5 passes to `cooldown()`. Replacing `cooldown(secs, ..)` with
+/// `cooldown(20, ..)` — making the flag silently inert — left every other
+/// test in the workspace green, because the unit tests cover the
+/// *resolution* and the *validation* but never the hand-off.
+///
+/// An earlier version of this test timed two runs and asserted the longer
+/// cooldown took at least three seconds more. That worked, but it cost
+/// eighteen seconds of root-suite time and could only ever prove an
+/// inequality. The countdown is written to stdout even when stdout is a
+/// pipe, and its first tick is the configured total verbatim — so one
+/// three-second run proves the exact value arrived, and the mutation's
+/// signature (`(20s)`) is asserted absent rather than merely improbable.
+///
+/// This does couple the test to the UI printing a countdown. That is
+/// deliberate: it is the only externally observable evidence that the
+/// number reached the sleep, and a change that stopped printing it would
+/// itself be a behaviour change worth a failing test.
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary; Miri interprets one program")]
+fn cooldown_secs_reaches_the_sleep() {
+    let lo = Loop::attach("cdsecs", 0x00);
+    let img_path = TempImage::write("cdsecs-img", &[0x5A; 4096]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_imi"))
+        .args(["-i"])
+        .arg(&img_path)
+        .args(["-d", &lo.node, "--yes", "--skip-verification", "--cooldown-secs", "3"])
+        .output()
+        .expect("spawn imi");
+    let text =
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+
+    assert!(out.status.success(), "the run must succeed:\n{text}");
+    assert!(
+        text.contains("(3s)"),
+        "the countdown must start from the requested value, not the default:\n{text}"
+    );
+    assert!(
+        !text.contains(&format!("({}s)", imi_core::DEFAULT_COOLDOWN_SECS)),
+        "counting down from the default means the flag never reached the sleep:\n{text}"
+    );
 }
 
 /// The exit codes a script branches on.
@@ -594,7 +649,7 @@ fn an_interrupted_flash_warns_that_the_device_is_unsafe() {
         .spawn()
         .expect("spawn imi");
 
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(1500));
     // SIGINT is what an operator's Ctrl-C sends.
     let killed =
         Command::new("kill").args(["-INT", &child.id().to_string()]).status().expect("signal");
