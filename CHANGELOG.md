@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-15
+
+### Added
+
+- Add cargo login step in release recipe
+
+### Fixed
+
+- Ignore test that requires root
+
 ## [0.4.0] - 2026-10-15
 
 ### Added
@@ -20,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump libc (#7)
 - Update documentation for --cooldown-secs flag
 - Update lockfile
+- Bump to v0.4.0
 
 ### Fixed
 
@@ -162,6 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial commit
 
+[0.4.1]: https://github.com/veralvx/imi/compare/v0.4.0..v0.4.1
 [0.4.0]: https://github.com/veralvx/imi/compare/v0.3.0..v0.4.0
 [0.3.0]: https://github.com/veralvx/imi/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/veralvx/imi/compare/v0.1.7..v0.2.0
