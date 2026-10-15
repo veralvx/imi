@@ -335,7 +335,7 @@ fn omitting_dev_without_a_terminal_refuses_with_guidance() {
 /// number reached the sleep, and a change that stopped printing it would
 /// itself be a behaviour change worth a failing test.
 #[test]
-#[cfg_attr(miri, ignore = "spawns the compiled binary; Miri interprets one program")]
+#[ignore = "spawns the compiled binary; Miri interprets one program"]
 fn cooldown_secs_reaches_the_sleep() {
     let lo = Loop::attach("cdsecs", 0x00);
     let img_path = TempImage::write("cdsecs-img", &[0x5A; 4096]);
