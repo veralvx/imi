@@ -13,10 +13,11 @@ This phase splits in two:
   flush-honoring controllers; cli.rs carries the operator-facing risk).
 - **5b — Verification.** Skipped with `--skip-verification`.
 
-## Phase 5a — the 10-second cooldown
+## Phase 5a — the cooldown (20 s by default)
 
 ```rust
-phase_5::cooldown(10, cancel, events)?;
+let secs = validate_cooldown_secs(config.resolved_cooldown_secs())?;
+phase_5::cooldown(secs, cancel, events)?;
 ```
 
 This is **not** ritual. Cheap USB-NAND bridge controllers (Phison, SMI,
@@ -58,9 +59,15 @@ wall-clock wait.
   serving reads concurrently on a 1 W power budget) → verification
   reports false-positive failures.
 
-A 10-second wall-clock wait reliably avoids both. We borrow this
-constant from the bash original where it was tuned empirically against
-~30 different USB sticks.
+A wall-clock wait reliably avoids both. The bash original used ten
+seconds, tuned empirically against ~30 different USB sticks. That
+measurement is a floor the current default respects rather than
+replaces: `DEFAULT_COOLDOWN_SECS` is 20, because a longer wait cannot
+fail where a shorter one succeeded, and the extra ten seconds cover the
+tail of the drain distribution the original sample cannot speak to.
+The asymmetry decides it — too short risks corruption or a false
+verification failure, too long costs seconds on a run that took
+minutes. `--cooldown-secs` overrides it; `--skip-cooldown` omits it.
 
 ### Cooldown implementation
 

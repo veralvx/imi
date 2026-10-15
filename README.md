@@ -24,8 +24,9 @@ stop the run:
 - Wipes stale GPT/MBR signatures (first and last 1 MiB) so the new partition
   table is the only one the kernel sees.
 - Writes through `O_DIRECT` in 4 MiB aligned chunks, bypassing the page cache.
-- Waits 10 seconds after `fdatasync` for cheap USB-NAND bridge controllers to
-  drain their write cache to flash (skippable with `--skip-cooldown`).
+- Waits 20 seconds after `fdatasync` for cheap USB-NAND bridge controllers to
+  drain their write cache to flash (tunable with `--cooldown-secs`,
+  skippable with `--skip-cooldown`).
 - Reads back exactly the bytes written under the same lock, comparing against a
   fresh decompress of the source image, and reports the absolute byte offset of
   the first mismatch (skippable with `--skip-verification`).
@@ -98,14 +99,15 @@ Safely flash an ISO/IMG (optionally compressed) to a USB block device.
 Usage: imi [OPTIONS] --img <PATH>
 
 Options:
-  -i, --img <PATH>         Path to the source .iso/.img file (may be gzip/xz/bzip2/zstd compressed)
-  -d, --dev <DEVICE>       Target block device, e.g. /dev/sdc. Must be a whole disk, not a partition. Omit to pick interactively: candidate devices are listed (path, size, model; removable first) for arrow-key selection. Only whole disks with media, no block-layer holders, and no mounts outside /media, /run/media, /var/run/media are offered, so the system disk never appears. Esc aborts; without a terminal the candidates are printed and the run refuses. Nothing is ever auto-selected
-  -t, --throttle [<RATE>]  Write/read rate cap (e.g. 500K, 8M, 1G). Omit flag entirely for unthrottled; pass `-t` with no value to default to 8M
-  -y, --yes                Skip the interactive TTY confirmation. Intended for automation; use with care
-      --skip-verification  Skip Phase 5b byte-for-byte verification. The hardware cooldown (Phase 5a, unless --skip-cooldown), kernel partition-table sync (Phase 6), and automount defense (Phase 7) all still run — only the readback compare is omitted. Use this when you trust the device and the throughput gain is worth the loss of the defect-detection pass
-      --skip-cooldown      Skip the 10-second hardware cooldown (Phase 5a). The cooldown lets cheap USB-NAND bridge controllers drain their DRAM write cache to flash after fdatasync returns; skipping it risks silent corruption on unplug for such devices. Intended for loop devices, automated tests, and high-quality media whose controllers honor cache flushes
-  -h, --help               Print help
-  -V, --version            Print version
+  -i, --img <PATH>               Path to the source .iso/.img file (may be gzip/xz/bzip2/zstd compressed)
+  -d, --dev <DEVICE>             Target block device, e.g. /dev/sdc. Must be a whole disk, not a partition. Omit to pick interactively: candidate devices are listed (path, size, model; removable first) for arrow-key selection. Only whole disks with media, no block-layer holders, and no mounts outside /media, /run/media, /var/run/media are offered, so the system disk never appears. Esc aborts; without a terminal the candidates are printed and the run refuses. Nothing is ever auto-selected
+  -t, --throttle [<RATE>]        Write/read rate cap (e.g. 500K, 8M, 1G). Omit flag entirely for unthrottled; pass `-t` with no value to default to 8M
+  -y, --yes                      Skip the interactive TTY confirmation. Intended for automation; use with care
+      --skip-verification        Skip Phase 5b byte-for-byte verification. The hardware cooldown (Phase 5a, unless --skip-cooldown), kernel partition-table sync (Phase 6), and automount defense (Phase 7) all still run — only the readback compare is omitted. Use this when you trust the device and the throughput gain is worth the loss of the defect-detection pass
+      --skip-cooldown            Skip the Phase 5a hardware cooldown entirely (20 s by default; see --cooldown-secs to shorten rather than skip it). The cooldown lets cheap USB-NAND bridge controllers drain their DRAM write cache to flash after fdatasync returns; skipping it risks silent corruption on unplug for such devices. Intended for loop devices, automated tests, and high-quality media whose controllers honor cache flushes
+      --cooldown-secs <SECONDS>  Seconds to wait after the flash for the device controller to drain its write cache (Phase 5a). Default 20. Lowering it risks two things: corruption if the device is unplugged while its controller is still writing, and — seen more often — verification reporting a false failure, because reading at full speed during the drain window can brown out a bus-powered bridge. This matters more, not less, with --skip-verification: without the verify pass the cooldown is the only settling time before unplug. Use --skip-cooldown to omit the wait entirely
+  -h, --help                     Print help
+  -V, --version                  Print version
 ```
 
 ## Execution phases
@@ -121,7 +123,7 @@ the interrupted state (phases 3–5b).
 | 2     | Opens the device with `O_EXCL` (kernel-level exclusive claim), then re-reads mounts to catch anything that raced the open.                                                                                           |
 | 3     | Arms the interrupt guard. Wipes the first and last 1 MiB to destroy stale GPT/MBR/PMBR signatures.                                                                                                                   |
 | 4     | Writes the image in 4 MiB `O_DIRECT` chunks. Compressed images decompress on a worker thread; raw images write single-threaded.                                                                                      |
-| 5a    | 10-second cooldown for USB-NAND FTL cache drain (`--skip-cooldown` skips).                                                                                                                                           |
+| 5a    | 20-second cooldown for USB-NAND FTL cache drain (`--cooldown-secs` tunes, `--skip-cooldown` skips).                                                                                                                  |
 | 5b    | Reads back every written byte under the same lock and compares against a fresh decompress of the source image (`--skip-verification` skips).                                                                         |
 | 6     | Issues `BLKRRPART` so the kernel re-reads the new partition table, then drops the `O_EXCL` lock.                                                                                                                     |
 | 7     | Sweeps for desktop auto-mounts that fired between lock release and process exit.                                                                                                                                     |

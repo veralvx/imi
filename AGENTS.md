@@ -39,7 +39,11 @@ with no shell-outs.
    - Phase 5a (cooldown) **must** run unless the operator explicitly
      passed `--skip-cooldown`; `--skip-verification` must never skip it. Pulling
      power before USB-NAND controllers finish FTL drain corrupts the flash
-     even on a successful write.
+     even on a successful write. `--cooldown-secs` shortens the wait
+     but cannot remove it: zero is refused and redirected to
+     `--skip-cooldown`, precisely so that skipping stays an explicit act
+     carrying the warning above. Making `--cooldown-secs 0` a synonym
+     would violate this invariant while looking like a convenience.
    - Phase 6 (`BLKRRPART`) **must** happen before the FD is dropped. Phase
      7 (automount defense) **must** happen after.
 

@@ -18,7 +18,8 @@ imi [OPTIONS] --img <PATH> --dev <DEVICE>
   -t, --throttle [<RATE>]    Bandwidth cap. Suffixes K/M/G are binary multiples.
   -y, --yes                  Skip TTY confirmation
   --skip-verification        Skip Phase 5b read-back compare (Phases 6 + 7 still run)
-  --skip-cooldown            Skip the 10 s Phase 5a hardware cooldown
+  --cooldown-secs <SECONDS>  Seconds for the Phase 5a cooldown (default 20)
+  --skip-cooldown            Skip the Phase 5a hardware cooldown entirely
   -h, --help                 Print help
   -V, --version              Print version
 ```
@@ -44,7 +45,8 @@ numerics, and unknown suffixes.
 read-back compare); `--skip-cooldown` skips **only** Phase 5a. Each is
 independent, and everything else still runs:
 
-- Phase 5a — 10-second hardware cooldown, unless `--skip-cooldown`.
+- Phase 5a — 20-second hardware cooldown by default (`--cooldown-secs`
+  overrides), unless `--skip-cooldown`.
   Cheap USB-NAND bridges drain writes from DRAM cache to flash on their
   own schedule, performing TLC/QLC garbage collection and FTL table
   updates while doing so. Pulling power before that completes corrupts
