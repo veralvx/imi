@@ -185,6 +185,7 @@ release semver:
 
   # 10. Push branch and tag atomically
   git push --follow-tags origin main
+  cargo login
   cargo publish
 
   echo "Released $tag"
