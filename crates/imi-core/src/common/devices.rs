@@ -372,7 +372,7 @@ mod tests {
         let knames: Vec<String> = ["loop0", "zram0", "dm-3", "sr0", "md127", "nbd1", "fd0", "ram2"]
             .map(str::to_owned)
             .into();
-        assert!(candidates_from_parts(&knames, "", &boom).is_empty());
+        assert_eq!(candidates_from_parts(&knames, "", &boom), Vec::<CandidateDevice>::new());
     }
 
     /// The keep path, end to end through the real function.

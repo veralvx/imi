@@ -992,7 +992,7 @@ mod tests {
         assert_eq!(parts, vec!["sda1".to_owned(), "sda2".to_owned()]);
 
         // A disk with no partitions yields an empty list, not an error.
-        assert!(partitions_of_in(r, "dm-0").unwrap().is_empty());
+        assert_eq!(partitions_of_in(r, "dm-0").unwrap(), Vec::<String>::new());
         // A device that does not exist is an error, not silence.
         partitions_of_in(r, "sdz").unwrap_err();
     }
