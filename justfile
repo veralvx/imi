@@ -44,8 +44,18 @@ clippy:
   #cargo +nightly clippy --all-targets --all-features --workspace
   #cargo +nightly clippy --all-targets --no-default-features --workspace
 
+# In the flake's shell cargo is no rustup proxy, even where rustup is
+# installed, so `+nightly` cannot reach a nightly there: the flake's
+# `miri` shell provides one instead, as it does where rustup is absent
+# and Nix is not. Anywhere else, rustup's nightly, as before.
 miri:
-  cargo +nightly miri test
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [ -n "${IN_NIX_SHELL:-}" ] || { ! command -v rustup > /dev/null && command -v nix > /dev/null; }; then
+    nix develop .#miri --command cargo miri test
+  else
+    cargo +nightly miri test
+  fi
 
 fmt-check:
   cargo fmt --check

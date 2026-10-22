@@ -19,6 +19,12 @@ To build and test `imi` locally, you will need the following tools:
 The last two are easy to miss: without them `just checks` fails on
 tooling rather than on anything wrong with your change.
 
+With [Nix](https://nixos.org), `nix develop` provides all of the above
+except the nightly toolchain, at the versions `flake.lock` pins, plus the
+tools the loop-device suites and `valgrind` recipes use; `just miri` enters
+the flake's `miri` shell for Miri on its own. `nix flake check` builds the
+binary and runs clippy, rustfmt, rustdoc and the tests in the sandbox.
+
 ## Setup
 
 1. Fork this repository and create your branch from `main`.

@@ -9,3 +9,6 @@ __pycache__/
 
 
 .agents/tools
+
+# nix build
+/result
