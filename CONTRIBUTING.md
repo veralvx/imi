@@ -23,7 +23,8 @@ With [Nix](https://nixos.org), `nix develop` provides all of the above
 except the nightly toolchain, at the versions `flake.lock` pins, plus the
 tools the loop-device suites and `valgrind` recipes use; `just miri` enters
 the flake's `miri` shell for Miri on its own. `nix flake check` builds the
-binary and runs clippy, rustfmt, rustdoc and the tests in the sandbox.
+binary and runs clippy, rustfmt, rustdoc and the tests in the sandbox, as
+CI's `nix.yml` does on x86_64 and aarch64.
 
 ## Setup
 

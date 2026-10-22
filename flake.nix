@@ -7,7 +7,8 @@
 #   nix fmt              nixfmt, through treefmt; `nix fmt -- --ci` formats, and fails if that
 #                        changed a file
 #   nix flake check      clippy, rustfmt, rustdoc and the tests, and the format (`nix fmt`'s
-#                        verdict), offline in the sandbox
+#                        verdict), offline in the sandbox; CI runs it on x86_64 and aarch64
+#                        (.github/workflows/nix.yml)
 #   nix build            the binary, as ./result/bin/imi
 #   nix run . -- --help  the binary, run
 #
