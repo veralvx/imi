@@ -193,12 +193,13 @@ release semver:
   git commit -m "chore(release): bump to $tag"
   git tag -a "$tag" -m "Release $tag"
 
-  # 10. Push branch and tag atomically
+  # 10. Push the branch and the tag. The tag push starts the Release
+  #     workflow (cargo-dist), and publish-crates.yml publishes imi-core,
+  #     then imi, to crates.io once that release has succeeded: nothing is
+  #     published from here.
   git push --follow-tags origin main
-  cargo login
-  cargo publish
 
-  echo "Released $tag"
+  echo "Released $tag: crates.io publishes once the Release workflow succeeds"
 
 
 

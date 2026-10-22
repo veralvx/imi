@@ -1,0 +1,188 @@
+# Publishes the crates to crates.io for each release: `just release` pushes
+# the tag, and this workflow waits for that tag's Release workflow
+# (cargo-dist, release.yml) to succeed, then publishes the tag's sources,
+# imi-core first (imi depends on it), then imi.
+#
+# It runs on the tag push itself, not on `workflow_run`: crates.io trusted
+# publishing rejects OIDC tokens from `workflow_run` events.
+#
+# Authentication is crates.io trusted publishing (OIDC), with a
+# CARGO_REGISTRY_TOKEN repository secret as a fallback. One-time setup:
+#   1. crates.io → imi-core → Settings → Trusted Publishing → add GitHub:
+#      owner `veralvx`, repository `imi`, workflow `publish-crates.yml`,
+#      environment `crates-io`. Repeat for imi.
+#   2. GitHub → Settings → Environments → `crates-io` (optionally with
+#      required reviewers). If it restricts deployment branches and tags,
+#      allow the tags `v*` (release runs) and `main` (manual runs).
+#
+# To (re)publish a release by hand, run it from the Actions tab with the
+# release tag; crate versions already on crates.io are skipped.
+name: Publish to crates.io
+
+on:
+  push:
+    # Release tags only (prereleases such as v1.0.0-rc.1 do not match).
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (e.g. v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # In dependency order.
+  CRATES: imi-core imi
+
+jobs:
+  release:
+    name: Wait for the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read # find and watch the Release run
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      crates: ${{ steps.registry.outputs.crates }}
+    steps:
+      - name: Resolve the release tag
+        id: tag
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a release tag (vX.Y.Z)"
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Find the crates not yet on crates.io
+        id: registry
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          missing=()
+          for crate in $CRATES; do
+            # The sparse index's path for the name: by length for names of
+            # one to three characters (imi is three), else by its first
+            # two pairs of characters.
+            case "${#crate}" in
+              1 | 2) path="${#crate}/$crate" ;;
+              3) path="3/${crate:0:1}/$crate" ;;
+              *) path="${crate:0:2}/${crate:2:2}/$crate" ;;
+            esac
+            # 404: never published, so missing; anything else but 200 is
+            # an error, not a reason to publish or to skip.
+            status="$(curl -sS -o index.json -w '%{http_code}' "https://index.crates.io/$path")"
+            case "$status" in
+              200)
+                if jq -e --arg v "$VERSION" 'select(.vers == $v)' index.json > /dev/null; then
+                  echo "::notice::$crate $VERSION is already on crates.io; skipping it."
+                  continue
+                fi
+                ;;
+              404) ;;
+              *)
+                echo "::error::the crates.io index answered $status for $crate"
+                exit 1
+                ;;
+            esac
+            missing+=("$crate")
+          done
+          echo "crates=${missing[*]}" >> "$GITHUB_OUTPUT"
+
+      # The tag push starts the Release workflow and this one together; the
+      # crates are only published once that release has succeeded.
+      - name: Wait for the Release workflow to succeed
+        if: steps.registry.outputs.crates != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          for _ in $(seq 30); do
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml \
+              --branch "$TAG" --event push --limit 1 --json databaseId --jq '.[0].databaseId')"
+            [ -n "$run_id" ] && break
+            sleep 20
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::no Release run found for $TAG"
+            exit 1
+          fi
+          echo "Waiting for Release run $run_id"
+          if ! gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30 > /dev/null; then
+            echo "::error::the Release run for $TAG did not succeed; nothing was published"
+            exit 1
+          fi
+
+  publish:
+    name: Publish imi-core and imi
+    needs: release
+    if: needs.release.outputs.crates != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/imi
+    permissions:
+      contents: read
+      id-token: write # crates.io trusted publishing
+    env:
+      # Empty unless the fallback secret is set.
+      FALLBACK_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          persist-credentials: false
+
+      # The toolchain comes from rust-toolchain.toml (rustup installs it on
+      # first use). Beyond the versions, imi's pin on imi-core must be the
+      # tag's too: cargo publishes the requirement as written, so a stale
+      # pin would ship an imi that resolves the previous imi-core.
+      - name: Check the crate versions match the tag
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.version }}
+          MISSING: ${{ needs.release.outputs.crates }}
+        run: |
+          metadata="$(cargo metadata --no-deps --format-version 1 --locked)"
+          for crate in $MISSING; do
+            found="$(jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version' <<<"$metadata")"
+            if [ "$found" != "$VERSION" ]; then
+              echo "::error::$crate is $found at $TAG, expected $VERSION"
+              exit 1
+            fi
+          done
+          pin="$(jq -r '.packages[] | select(.name == "imi") | .dependencies[] | select(.name == "imi-core") | .req' <<<"$metadata")"
+          if [ "$pin" != "^$VERSION" ]; then
+            echo "::error::imi requires imi-core $pin at $TAG, expected ^$VERSION"
+            exit 1
+          fi
+
+      - name: Authenticate with crates.io
+        id: auth
+        if: env.FALLBACK_TOKEN == ''
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || env.FALLBACK_TOKEN }}
+          MISSING: ${{ needs.release.outputs.crates }}
+        run: |
+          # cargo publish waits until each crate is in the index, so imi
+          # resolves the imi-core it was just given.
+          for crate in $MISSING; do
+            cargo publish --locked -p "$crate"
+          done
