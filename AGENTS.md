@@ -219,9 +219,11 @@ exists to prevent.
 The split has one operational consequence worth writing down, because it
 looks like a broken build if you meet it without warning.
 
-`crates/imi/Cargo.toml` depends on `imi-core = { version = "0.2.0",
-path = "crates/imi-core" }`. When packaging, cargo drops the path and
-requires that exact version from the registry. So:
+`crates/imi` depends on `imi-core` through the workspace's
+`Cargo.toml`: `imi-core = { version = "<the release's version>", path =
+"crates/imi-core" }`, which `just release` bumps with the workspace
+version. When packaging, cargo drops the path and requires that version
+from the registry. So:
 
 ```sh
 cargo publish -p imi-core     # must go first
@@ -232,12 +234,15 @@ Until `imi-core` is published, `cargo package -p imi` fails with
 "no matching package named `imi-core` found" — which is correct
 behaviour, not a defect in the manifest.
 
-This matters right now: `imi` is on crates.io at 0.1.7, the
-pre-workspace monolith, and `imi-core` has never been published at all.
-Both README instructions that name it — `cargo add imi-core` and the
-link to `crates.io/crates/imi-core` — become true only after the first
-command above. The release workflow does not do this; `cargo-dist`
-builds binaries for GitHub Releases and never touches the registry.
+CI does this, not `just release`: the tag push starts the Release
+workflow (`cargo-dist`, which builds binaries for GitHub Releases and
+never touches the registry) and `publish-crates.yml`, which waits for
+that release to succeed and then publishes in the order above, skipping
+any version already on crates.io. It refuses a tag whose crate versions,
+or whose `imi-core` pin, differ from the tag's — the pin because cargo
+publishes the requirement as written, so a stale one would ship an `imi`
+resolving the previous `imi-core`. A failed or partial publish is re-run
+from the Actions tab with the tag.
 
 Signal handling lives in the binary, not the library: taking over
 process-wide signal disposition is the application's business, so
