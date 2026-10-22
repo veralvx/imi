@@ -41,7 +41,7 @@ USB write. Raw images stay single-threaded (their read cost is negligible).
 
 - Linux (kernel 2.6.26 or later — needs `/proc/self/mountinfo`).
 - Root privileges (`sudo`).
-- Rust 1.95+ to build from source.
+- Rust 1.99.1+ to build from source.
 
 ## Install
 
