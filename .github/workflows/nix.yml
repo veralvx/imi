@@ -1,0 +1,72 @@
+name: Nix
+
+# The flake's formatter (`nix fmt`), then its checks (flake.nix): clippy,
+# rustfmt, rustdoc, the package with the workspace's tests, and the
+# format, built in the sandbox with the toolchain rust-toolchain.toml
+# pins, on x86_64 and aarch64 Linux -- the flake's two systems, so each
+# is built natively and neither is first built by a user.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      # in the flake's src: api_consumer.rs compares its example against it
+      - "README.md"
+      - ".cargo/config.toml"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      # in the flake's src: api_consumer.rs compares its example against it
+      - "README.md"
+      - ".cargo/config.toml"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/nix.yml"
+  workflow_dispatch:
+
+# a pull request's newest run cancels its older ones; any other run, a
+# group of its own: every commit on main checked
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    name: nix flake check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        # flakes on, and the job's token for GitHub fetches
+        uses: cachix/install-nix-action@v31
+
+      # nixfmt's verdict as `nix fmt` gives it: --ci formats, and fails if
+      # that changed a file, as the flake's `format` check fails
+      - name: nix fmt (check)
+        run: nix fmt -- --ci
+
+      - name: nix flake check
+        run: nix flake check --print-build-logs

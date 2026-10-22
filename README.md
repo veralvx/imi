@@ -63,6 +63,13 @@ cd imi
 cargo build --release
 ```
 
+Or with [Nix](https://nixos.org), on the toolchain `rust-toolchain.toml` pins:
+
+```
+nix build github:veralvx/imi     # ./result/bin/imi
+nix run github:veralvx/imi -- --help
+```
+
 ## Usage
 
 ```
