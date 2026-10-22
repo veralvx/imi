@@ -1,10 +1,10 @@
 name: Nix
 
 # The flake's formatter (`nix fmt`), then its checks (flake.nix): clippy,
-# rustfmt, rustdoc, the package with the workspace's tests, and the
-# format, built in the sandbox with the toolchain rust-toolchain.toml
-# pins, on x86_64 and aarch64 Linux -- the flake's two systems, so each
-# is built natively and neither is first built by a user.
+# rustfmt, rustdoc, the package with the workspace's tests, the format and
+# both dev shells, built in the sandbox with the toolchain
+# rust-toolchain.toml pins, on x86_64 and aarch64 Linux -- the flake's two
+# systems, so each is built natively and neither is first built by a user.
 
 on:
   push:
@@ -22,20 +22,10 @@ on:
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/nix.yml"
+  # every pull request, whatever it touches: a required check that never
+  # reports blocks the merge, and these are the checks Dependabot's
+  # flake.lock updates auto-merge on
   pull_request:
-    paths:
-      - "**/*.rs"
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
-      # in the flake's src: api_consumer.rs compares its example against it
-      - "README.md"
-      - ".cargo/config.toml"
-      - "clippy.toml"
-      - "rustfmt.toml"
-      - "rust-toolchain.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/nix.yml"
   workflow_dispatch:
 
 # a pull request's newest run cancels its older ones; any other run, a
