@@ -6,9 +6,9 @@
 #   nix develop .#miri   nightly with Miri, for `just miri` (`cargo miri test`)
 #   nix fmt              nixfmt, through treefmt; `nix fmt -- --ci` formats, and fails if that
 #                        changed a file
-#   nix flake check      clippy, rustfmt, rustdoc and the tests, and the format (`nix fmt`'s
-#                        verdict), offline in the sandbox; CI runs it on x86_64 and aarch64
-#                        (.github/workflows/nix.yml)
+#   nix flake check      clippy, rustfmt, rustdoc and the tests, the format (`nix fmt`'s
+#                        verdict) and both dev shells, offline in the sandbox; CI runs it on
+#                        x86_64 and aarch64 (.github/workflows/nix.yml)
 #   nix build            the binary, as ./result/bin/imi
 #   nix run . -- --help  the binary, run
 #
@@ -16,7 +16,8 @@
 # builds for nothing else. The tests the sandbox runs are the unprivileged ones; the loop-device
 # suites stay `#[ignore]`d (AGENTS.md, "Testing additions"): they need root and /dev/loop*.
 #
-# flake.lock pins nixpkgs and rust-overlay: commit it; `nix flake update` moves it.
+# flake.lock pins nixpkgs and rust-overlay: commit it; `nix flake update` moves it, and
+# Dependabot does weekly (.github/dependabot.yml).
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -148,17 +149,6 @@
               };
             }
           );
-        in
-        {
-          packages.default = package;
-          checks = {
-            clippy = cargoCheck "clippy" "cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings";
-            fmt = cargoCheck "fmt" "cargo fmt --all -- --check";
-            doc = cargoCheck "doc" "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features --locked --offline";
-            # the formatter's verdict on the whole tree: what `nix fmt` would change fails it
-            format = formatter.check ./.;
-            inherit package;
-          };
           devShells = {
             default = pkgs.mkShell {
               packages = [
@@ -196,7 +186,22 @@
               ];
             };
           };
-          inherit formatter;
+        in
+        {
+          packages.default = package;
+          checks = {
+            clippy = cargoCheck "clippy" "cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings";
+            fmt = cargoCheck "fmt" "cargo fmt --all -- --check";
+            doc = cargoCheck "doc" "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features --locked --offline";
+            # the formatter's verdict on the whole tree: what `nix fmt` would change fails it
+            format = formatter.check ./.;
+            inherit package;
+            # the dev shells built, not just evaluated: an input update that breaks a tool in
+            # either fails here, before Dependabot's pull request can merge
+            devShell = devShells.default;
+            miriShell = devShells.miri;
+          };
+          inherit devShells formatter;
         };
 
       bySystem = lib.genAttrs systems (system: perSystem nixpkgs.legacyPackages.${system});
