@@ -272,7 +272,7 @@ made — including failure modes that motivated each defence.
 
 ## Style and idioms
 
-- Edition 2024; toolchain pinned to 1.95 in `rust-toolchain.toml`, matching
+- Edition 2024; toolchain pinned to 1.99.1 in `rust-toolchain.toml`, matching
   `rust-version` in `Cargo.toml`. If you find yourself
   needing a newer feature, raise the MSRV in a separate commit with
   justification — don't sneak it in.

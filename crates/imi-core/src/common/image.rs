@@ -620,7 +620,7 @@ mod tests {
             Compression::Zstd,
         ] {
             assert_eq!(c.to_string(), c.label());
-            assert!(!c.label().is_empty());
+            assert_ne!(c.label(), "");
         }
     }
 }

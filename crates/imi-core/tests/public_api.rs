@@ -211,7 +211,7 @@ fn phase_entry_points_chain_from_outside_the_crate() {
 #[test]
 fn compression_queries_are_public() {
     assert!(!imi_core::Compression::Raw.is_compressed());
-    assert!(!imi_core::Compression::Raw.label().is_empty());
+    assert_ne!(imi_core::Compression::Raw.label(), "");
 }
 
 /// Phase 0 must *return* an error for an unusable target, never panic
@@ -441,7 +441,7 @@ fn the_error_type_is_a_first_class_std_error() {
     // error-handling crates absorb a foreign error.
     let boxed: Box<dyn std::error::Error + Send + Sync> =
         Box::new(imi_core::run(&nonexistent_config()).unwrap_err());
-    assert!(!boxed.to_string().is_empty());
+    assert_ne!(boxed.to_string(), "");
 }
 
 /// A consumer must be able to answer "is the device safe to unplug?"
