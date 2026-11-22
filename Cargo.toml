@@ -20,7 +20,7 @@ ctrlc = { version = "3.5", features = ["termination"] }
 dialoguer = { version = "0.12", default-features = false }
 indicatif = { version = "0.18", default-features = false, features = ["unicode-width"] }
 libc = "0.2"
-nix = { version = "0.31", features = ["fs", "ioctl", "mount", "user"] }
+nix = { version = "0.32", features = ["fs", "ioctl", "mount", "user"] }
 
 # DO NOT enable parallel/multithreaded features on the four decompressor
 # crates below without re-doing the analysis in
